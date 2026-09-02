@@ -1,0 +1,4 @@
+viewer
+*.o
+*.ppm
+.DS_Store
