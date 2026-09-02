@@ -8,16 +8,20 @@ DATADIR ?= $(PREFIX)/share
 DESKTOPDIR ?= $(DATADIR)/applications
 
 TARGET  := viewer
-SRC     := main.c
-HEADERS := stb_image.h font8x8.h
+SRC     := main.c viewer.c browser.c text.c
+OBJ     := $(SRC:.c=.o)
+HEADERS := viewer.h browser.h text.h stb_image.h font8x8.h
 
 all: $(TARGET)
 
-$(TARGET): $(SRC) $(HEADERS)
-	$(CC) $(CFLAGS) $(SRC) -o $(TARGET) $(LDFLAGS)
+$(TARGET): $(OBJ)
+	$(CC) $(CFLAGS) $(OBJ) -o $(TARGET) $(LDFLAGS)
+
+%.o: %.c $(HEADERS)
+	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(OBJ)
 
 install: $(TARGET) c-image-viewer.desktop
 	install -Dm755 $(TARGET) $(DESTDIR)$(BINDIR)/c-image-viewer
