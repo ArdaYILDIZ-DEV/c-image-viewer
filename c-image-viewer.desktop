@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=c-image-viewer
+Comment=Minimalist dual-pane image viewer with synchronized zoom
+Exec=c-image-viewer %F
+Icon=image-x-generic
+Terminal=false
+Type=Application
+Categories=Graphics;Viewer;Photography;
+MimeType=image/jpeg;image/png;image/webp;image/bmp;image/x-portable-pixmap;image/tiff;image/gif;
+StartupNotify=true
+Keywords=viewer;image;compare;sync;zoom;
