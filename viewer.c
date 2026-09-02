@@ -25,8 +25,10 @@
 
 #include "viewer.h"
 #include "text.h"
+#include "exif.h"
 
 #include <SDL2/SDL.h>
+#include <time.h>
 #include <linux/limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,6 +73,7 @@ float g_free_pan_y[2] = {0.0f, 0.0f};
 
 bool g_show_info = true;
 bool g_show_help = false;
+bool g_show_metadata = false;
 
 char **g_file_list = NULL;
 int g_file_count = 0;
@@ -571,6 +574,150 @@ void viewer_render_help(SDL_Renderer *ren) {
     }
 }
 
+void viewer_toggle_metadata(void) {
+    g_show_metadata = !g_show_metadata;
+}
+
+/**
+ * Render right-side metadata panel (when g_show_metadata is true).
+ *
+ * Shows file system info (size, mtime, dimensions) and EXIF tags when
+ * available. The panel is 380px wide, anchored to the right, with a
+ * semi-transparent background and a header. Each metadata field is a
+ * label/value pair drawn with the bitmap font.
+ */
+void viewer_render_metadata(SDL_Renderer *ren) {
+    if (!g_show_metadata) return;
+    // Choose active pane's image for metadata (or pane 0 if sync)
+    int pane = g_sync ? 0 : g_active;
+    if (pane >= g_count) pane = 0;
+    if (g_count == 0 || !g_img[pane].path) return;
+
+    const char *path = g_img[pane].path;
+    Image *im = &g_img[pane];
+
+    // Gather file info
+    struct stat st;
+    bool has_stat = (stat(path, &st) == 0);
+    char size_str[32] = "?";
+    char mtime_str[64] = "?";
+    if (has_stat) {
+        // Human readable size
+        if (st.st_size < 1024) snprintf(size_str, sizeof(size_str), "%ld B", (long)st.st_size);
+        else if (st.st_size < 1024*1024) snprintf(size_str, sizeof(size_str), "%.1f KB", st.st_size/1024.0);
+        else if (st.st_size < 1024*1024*1024) snprintf(size_str, sizeof(size_str), "%.1f MB", st.st_size/(1024.0*1024));
+        else snprintf(size_str, sizeof(size_str), "%.2f GB", st.st_size/(1024.0*1024*1024));
+        struct tm *tm = localtime(&st.st_mtime);
+        if (tm) strftime(mtime_str, sizeof(mtime_str), "%Y-%m-%d %H:%M", tm);
+    }
+
+    ExifData exif;
+    exif_read(path, &exif);
+
+    // Panel geometry: 380px wide, 70% height centered vertically, right margin 12
+    int pw = 380;
+    if (pw > g_win_w - 40) pw = g_win_w - 40;
+    int ph = g_win_h - 80;
+    if (ph > 520) ph = 520;
+    int px = g_win_w - pw - 12;
+    int py = (g_win_h - ph) / 2;
+
+    // Background
+    SDL_Rect bg = {px, py, pw, ph};
+    SDL_SetRenderDrawColor(ren, 24, 24, 24, 235);
+    SDL_RenderFillRect(ren, &bg);
+    SDL_SetRenderDrawColor(ren, 70, 70, 70, 255);
+    SDL_RenderDrawRect(ren, &bg);
+
+    // Title bar
+    SDL_Rect title_bg = {px, py, pw, 26};
+    SDL_SetRenderDrawColor(ren, 38, 38, 38, 255);
+    SDL_RenderFillRect(ren, &title_bg);
+    SDL_SetRenderDrawColor(ren, 70, 70, 70, 255);
+    SDL_RenderDrawLine(ren, px, py+26, px+pw, py+26);
+
+    SDL_Color title_col = {255, 220, 100, 255};
+    SDL_Color label_col = {160, 160, 160, 255};
+    SDL_Color value_col = {220, 220, 220, 255};
+    SDL_Color dim_col = {140, 140, 140, 255};
+
+    const char *base = strrchr(path, '/');
+    base = base ? base + 1 : path;
+    char title[256];
+    snprintf(title, sizeof(title), "Metadata — %s", base);
+    // Truncate title if too long
+    int max_title = (pw - 16) / 8;
+    if ((int)strlen(title) > max_title) { title[max_title-3]='.'; title[max_title-2]='.'; title[max_title-1]='.'; title[max_title]='\0'; }
+    text_draw(ren, px+8, py+9, title, title_col, 1);
+
+    int y = py + 36;
+    int line_h = 14;
+    int label_x = px + 12;
+    int value_x = px + 120;
+
+    // Helper macro to draw label/value pairs and advance y
+    #define MD_ROW(label, value) do { \
+        text_draw(ren, label_x, y, label, label_col, 1); \
+        text_draw_clipped(ren, value_x, y, value, value_col, 1, pw - (value_x - px) - 12); \
+        y += line_h; \
+    } while(0)
+
+    char dim[64];
+    snprintf(dim, sizeof(dim), "%d x %d", im->w, im->h);
+    MD_ROW("Dimensions", dim);
+    MD_ROW("File size", size_str);
+    MD_ROW("Modified", mtime_str);
+    // Path (show full, truncated)
+    char path_disp[PATH_MAX];
+    strncpy(path_disp, path, sizeof(path_disp)-1); path_disp[sizeof(path_disp)-1]='\0';
+    // Shorten home prefix
+    const char *home = getenv("HOME");
+    if (home && strncmp(path_disp, home, strlen(home))==0) {
+        char tmp[PATH_MAX]; snprintf(tmp, sizeof(tmp), "~%s", path_disp + strlen(home)); strncpy(path_disp, tmp, sizeof(path_disp)-1);
+    }
+    MD_ROW("Path", path_disp);
+
+    y += 4;
+    // Separator
+    SDL_SetRenderDrawColor(ren, 50, 50, 50, 255);
+    SDL_RenderDrawLine(ren, px+12, y, px+pw-12, y);
+    y += 8;
+    text_draw(ren, label_x, y, "EXIF", label_col, 1);
+    y += line_h;
+
+    if (!exif.has_exif) {
+        text_draw(ren, label_x, y, "No EXIF data", dim_col, 1);
+        y += line_h;
+    } else {
+        if (exif.make[0] || exif.model[0]) {
+            char cam[128]; snprintf(cam, sizeof(cam), "%s %s", exif.make, exif.model);
+            MD_ROW("Camera", cam);
+        }
+        if (exif.datetime[0]) MD_ROW("Date", exif.datetime);
+        if (exif.software[0]) MD_ROW("Software", exif.software);
+        char ori[16]; snprintf(ori, sizeof(ori), "%d", exif.orientation);
+        MD_ROW("Orientation", ori);
+        if (exif.iso) { char s[16]; snprintf(s, sizeof(s), "ISO %d", exif.iso); MD_ROW("ISO", s); }
+        if (exif.exposure[0]) MD_ROW("Exposure", exif.exposure);
+        if (exif.fnumber[0]) MD_ROW("Aperture", exif.fnumber);
+        if (exif.focal[0]) MD_ROW("Focal", exif.focal);
+        if (exif.exif_width && exif.exif_height) {
+            char s[32]; snprintf(s, sizeof(s), "%d x %d", exif.exif_width, exif.exif_height);
+            MD_ROW("EXIF size", s);
+        }
+    }
+
+    #undef MD_ROW
+
+    // Footer hint
+    SDL_Rect footer = {px, py+ph-20, pw, 20};
+    SDL_SetRenderDrawColor(ren, 38, 38, 38, 255);
+    SDL_RenderFillRect(ren, &footer);
+    SDL_SetRenderDrawColor(ren, 70, 70, 70, 255);
+    SDL_RenderDrawLine(ren, px, py+ph-20, px+pw, py+ph-20);
+    text_draw(ren, px+8, py+ph-14, "Press e to close", dim_col, 1);
+}
+
 void viewer_render(SDL_Renderer *ren) {
     SDL_SetRenderDrawColor(ren, 18, 18, 18, 255);
     SDL_RenderClear(ren);
@@ -634,5 +781,6 @@ void viewer_render(SDL_Renderer *ren) {
 
     viewer_render_info_bar(ren);
     viewer_render_help(ren);
+    viewer_render_metadata(ren);
     // Browser overlay is rendered by main.c after this if open.
 }

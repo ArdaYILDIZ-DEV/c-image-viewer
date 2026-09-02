@@ -74,6 +74,10 @@ static int s_scroll = 0;
 static Uint32 s_last_click = 0;
 static int s_last_click_idx = -1;
 
+// Filter state: incremental search within visible entries
+static char s_filter[256] = {0};
+static bool s_filtering = false; // true when filter has content
+
 // Layout constants
 static const int kPanelMargin = 20;
 static const int kRowH = 18;
@@ -100,6 +104,74 @@ static int entry_cmp(const void *a, const void *b) {
     int c = strcasecmp(ea->name, eb->name);
     if (c != 0) return c;
     return strcmp(ea->name, eb->name);
+}
+
+// ---------------------------------------------------------------------------
+// Filter helpers (case-insensitive substring)
+// ---------------------------------------------------------------------------
+
+static bool strcasestr_simple(const char *haystack, const char *needle) {
+    if (!needle || needle[0] == '\0') return true;
+    size_t nlen = strlen(needle);
+    size_t hlen = strlen(haystack);
+    if (nlen > hlen) return false;
+    for (size_t i = 0; i <= hlen - nlen; i++) {
+        if (strncasecmp(haystack + i, needle, nlen) == 0) return true;
+    }
+    return false;
+}
+
+static bool matches_filter(const BrowserEntry *e) {
+    if (s_filter[0] == '\0') return true;
+    return strcasestr_simple(e->name, s_filter);
+}
+
+// Count visible entries matching filter (for scroll calculations)
+static int filtered_count(void) {
+    if (s_filter[0] == '\0') return s_count;
+    int c = 0;
+    for (int i = 0; i < s_count; i++) if (matches_filter(&s_entries[i])) c++;
+    return c;
+}
+
+// Convert filtered index to real index (0-based among visible)
+static int filtered_to_real(int filtered_idx) {
+    if (s_filter[0] == '\0') return filtered_idx;
+    int cur = -1;
+    for (int i = 0; i < s_count; i++) {
+        if (matches_filter(&s_entries[i])) {
+            cur++;
+            if (cur == filtered_idx) return i;
+        }
+    }
+    return -1;
+}
+
+// Convert real index to filtered index, or -1 if not visible
+static int real_to_filtered(int real_idx) {
+    if (s_filter[0] == '\0') return real_idx;
+    if (real_idx < 0 || real_idx >= s_count) return -1;
+    if (!matches_filter(&s_entries[real_idx])) return -1;
+    int c = 0;
+    for (int i = 0; i < real_idx; i++) if (matches_filter(&s_entries[i])) c++;
+    return c;
+}
+
+// Find next visible index after real_idx (wraps if needed), -1 if none
+static int next_visible(int real_idx) {
+    for (int i = real_idx + 1; i < s_count; i++) if (matches_filter(&s_entries[i])) return i;
+    return -1;
+}
+static int prev_visible(int real_idx) {
+    for (int i = real_idx - 1; i >= 0; i--) if (matches_filter(&s_entries[i])) return i;
+    return -1;
+}
+static void clear_filter(void) {
+    s_filter[0] = '\0';
+    s_filtering = false;
+}
+static void update_filter_active(void) {
+    s_filtering = (s_filter[0] != '\0');
 }
 
 /**
@@ -264,11 +336,11 @@ void browser_set_root(const char *path) {
 void browser_toggle(void) {
     if (s_open) {
         s_open = false;
+        SDL_StopTextInput();
         return;
     }
     // Opening: refresh from viewer's current dir to reflect external navigation
     if (g_current_dir[0] != '\0') {
-        // Only rebuild if root differs to preserve expanded state when possible
         char abs_cur[PATH_MAX];
         const char *cur = g_current_dir;
         if (realpath(g_current_dir, abs_cur)) cur = abs_cur;
@@ -278,68 +350,172 @@ void browser_toggle(void) {
     } else {
         browser_init();
     }
-    // Ensure selection is valid and visible
+    clear_filter();
     if (s_selected < 0) s_selected = 0;
     if (s_selected >= s_count) s_selected = s_count - 1;
+    // Ensure selected is visible when filtered
+    if (s_count > 0 && !matches_filter(&s_entries[s_selected])) {
+        int nxt = next_visible(s_selected);
+        if (nxt == -1) nxt = prev_visible(s_selected);
+        if (nxt != -1) s_selected = nxt;
+    }
     s_open = true;
+    SDL_StartTextInput();
 }
 
 bool browser_is_open(void) { return s_open; }
 
 static void clamp_scroll(int visible_rows) {
-    if (s_selected < s_scroll) s_scroll = s_selected;
-    if (s_selected >= s_scroll + visible_rows) s_scroll = s_selected - visible_rows + 1;
+    if (s_filter[0] == '\0') {
+        if (s_selected < s_scroll) s_scroll = s_selected;
+        if (s_selected >= s_scroll + visible_rows) s_scroll = s_selected - visible_rows + 1;
+        if (s_scroll < 0) s_scroll = 0;
+        if (s_scroll > s_count - visible_rows) s_scroll = s_count - visible_rows;
+        if (s_scroll < 0) s_scroll = 0;
+        return;
+    }
+    // Filtered mode: s_scroll is filtered offset, s_selected is real index
+    int sel_f = real_to_filtered(s_selected);
+    if (sel_f == -1) return; // selected not visible, keep scroll
+    int fcount = filtered_count();
+    if (sel_f < s_scroll) s_scroll = sel_f;
+    if (sel_f >= s_scroll + visible_rows) s_scroll = sel_f - visible_rows + 1;
     if (s_scroll < 0) s_scroll = 0;
-    if (s_scroll > s_count - visible_rows) s_scroll = s_count - visible_rows;
+    if (s_scroll > fcount - visible_rows) s_scroll = fcount - visible_rows;
     if (s_scroll < 0) s_scroll = 0;
 }
 
 bool browser_handle_key(SDL_Keycode key, SDL_Keymod mod) {
-    (void)mod;
     if (!s_open) return false;
 
-    // Compute visible rows for scrolling (updated per frame, but approximate here)
     int panel_h = g_win_h - 2 * kPanelMargin;
     int list_h = panel_h - kTitleH - kFooterH;
     int visible = list_h / kRowH;
     if (visible < 1) visible = 1;
 
-    switch (key) {
-    case SDLK_ESCAPE:
+    // Ctrl+F: focus filter (clear and start typing)
+    if ((mod & KMOD_CTRL) && key == SDLK_f) {
+        clear_filter();
+        s_filtering = true;
+        return true;
+    }
+    // ESC: clear filter if active, otherwise close browser
+    if (key == SDLK_ESCAPE) {
+        if (s_filter[0] != '\0') {
+            clear_filter();
+            // Ensure selected is visible after clearing
+            if (s_selected < 0) s_selected = 0;
+            clamp_scroll(visible);
+            return true;
+        }
         s_open = false;
+        SDL_StopTextInput();
         return true;
+    }
+    // Backspace: when filter active, edit filter instead of collapsing
+    if (key == SDLK_BACKSPACE) {
+        if (s_filter[0] != '\0') {
+            size_t len = strlen(s_filter);
+            if (len > 0) s_filter[len-1] = '\0';
+            update_filter_active();
+            // Ensure selected still matches filter
+            if (s_selected >= 0 && s_selected < s_count && !matches_filter(&s_entries[s_selected])) {
+                int nxt = next_visible(s_selected);
+                if (nxt == -1) nxt = prev_visible(s_selected);
+                if (nxt != -1) s_selected = nxt;
+            }
+            clamp_scroll(visible);
+            return true;
+        }
+        // If no filter, fall through to collapse handling below
+    }
+    // Filter typing: handle printable characters (without Ctrl/Alt) as filter input
+    // We also handle this via SDL_TEXTINPUT for proper unicode, but SDL_KEYDOWN covers simple ASCII.
+    // Only handle if not a control key we already processed and no Ctrl/Alt held.
+    if (!(mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) && key >= 32 && key <= 126) {
+        // Avoid handling keys that are already bound (arrows, etc.) - those are <32 or special
+        // For letters/numbers/symbols, treat as filter input when browser is open and not in a special context
+        // Check if it's a simple character key (not Return, Tab, etc. which have codes <32 or are handled)
+        bool is_printable = false;
+        if ((key >= SDLK_a && key <= SDLK_z) || (key >= SDLK_0 && key <= SDLK_9) ||
+            key == SDLK_SPACE || key == SDLK_MINUS || key == SDLK_EQUALS || key == SDLK_PERIOD ||
+            key == SDLK_COMMA || key == SDLK_SLASH || key == SDLK_BACKSLASH || key == SDLK_SEMICOLON ||
+            key == SDLK_QUOTE || key == SDLK_LEFTBRACKET || key == SDLK_RIGHTBRACKET || key == SDLK_BACKQUOTE) {
+            is_printable = true;
+        }
+        // Also allow uppercase via Shift: SDLK_a still reports 'a' but we check shift separately for display
+        if (is_printable) {
+            char c = (char)key;
+            // SDLK_a..z are always lower, map shift to upper for display but filter is case-insensitive so lower is fine
+            // Handle shift for symbols would be more complex; keep lower for simplicity and rely on case-insensitive match
+            size_t len = strlen(s_filter);
+            if (len < sizeof(s_filter)-1) {
+                s_filter[len] = c;
+                s_filter[len+1] = '\0';
+                s_filtering = true;
+                if (s_selected >= 0 && s_selected < s_count && !matches_filter(&s_entries[s_selected])) {
+                    // Move to first matching entry
+                    for (int i = 0; i < s_count; i++) if (matches_filter(&s_entries[i])) { s_selected = i; break; }
+                }
+                clamp_scroll(visible);
+            }
+            return true;
+        }
+    }
+
+    switch (key) {
     case SDLK_UP:
-    case SDLK_k:
-        if (s_selected > 0) s_selected--;
+    case SDLK_k: {
+        int prev = prev_visible(s_selected);
+        if (prev != -1) s_selected = prev;
+        else if (s_filter[0] == '\0' && s_selected > 0) s_selected--;
         clamp_scroll(visible);
         return true;
+    }
     case SDLK_DOWN:
-    case SDLK_j:
-        if (s_selected + 1 < s_count) s_selected++;
+    case SDLK_j: {
+        int nxt = next_visible(s_selected);
+        if (nxt != -1) s_selected = nxt;
+        else if (s_filter[0] == '\0' && s_selected + 1 < s_count) s_selected++;
         clamp_scroll(visible);
         return true;
-    case SDLK_HOME:
-        s_selected = 0;
+    }
+    case SDLK_HOME: {
+        // First visible
+        for (int i = 0; i < s_count; i++) if (matches_filter(&s_entries[i])) { s_selected = i; break; }
         s_scroll = 0;
         return true;
-    case SDLK_END:
-        s_selected = s_count - 1;
+    }
+    case SDLK_END: {
+        for (int i = s_count-1; i >=0; i--) if (matches_filter(&s_entries[i])) { s_selected = i; break; }
         clamp_scroll(visible);
         return true;
-    case SDLK_PAGEUP:
-        s_selected -= visible;
-        if (s_selected < 0) s_selected = 0;
+    }
+    case SDLK_PAGEUP: {
+        for (int i = 0; i < visible; i++) {
+            int prev = prev_visible(s_selected);
+            if (prev == -1) break;
+            s_selected = prev;
+        }
         clamp_scroll(visible);
         return true;
-    case SDLK_PAGEDOWN:
-        s_selected += visible;
-        if (s_selected >= s_count) s_selected = s_count - 1;
+    }
+    case SDLK_PAGEDOWN: {
+        for (int i = 0; i < visible; i++) {
+            int nxt = next_visible(s_selected);
+            if (nxt == -1) break;
+            s_selected = nxt;
+        }
         clamp_scroll(visible);
         return true;
+    }
     case SDLK_RIGHT:
         if (s_selected >= 0 && s_selected < s_count && s_entries[s_selected].is_dir) {
             if (!s_entries[s_selected].expanded) expand_entry(s_selected);
-            else if (s_selected + 1 < s_count) { s_selected++; clamp_scroll(visible); }
+            else {
+                int nxt = next_visible(s_selected);
+                if (nxt != -1) { s_selected = nxt; clamp_scroll(visible); }
+            }
         }
         return true;
     case SDLK_LEFT:
@@ -424,10 +600,13 @@ bool browser_handle_event(SDL_Event *ev) {
             if (ev->button.button == SDL_BUTTON_LEFT) s_open = false;
             return true;
         }
-        // Click inside list area
+        // Click inside list area (respect filter)
         if (my >= list_y && my < list_y + list_h) {
             int row = (my - list_y) / kRowH;
-            int idx = s_scroll + row;
+            int f_idx = s_scroll + row;
+            int idx;
+            if (s_filter[0] == '\0') idx = f_idx;
+            else idx = filtered_to_real(f_idx);
             if (idx >= 0 && idx < s_count) {
                 s_selected = idx;
                 // Double-click detection (300ms)
@@ -454,13 +633,13 @@ bool browser_handle_event(SDL_Event *ev) {
         // Consume all mouse clicks when browser is open to prevent panning behind
         return true;
     } else if (ev->type == SDL_MOUSEWHEEL) {
-        // Scroll list
+        int fcount = (s_filter[0] == '\0') ? s_count : filtered_count();
         if (ev->wheel.y > 0) {
             s_scroll -= 3;
             if (s_scroll < 0) s_scroll = 0;
         } else if (ev->wheel.y < 0) {
             s_scroll += 3;
-            int max_scroll = s_count - visible;
+            int max_scroll = fcount - visible;
             if (max_scroll < 0) max_scroll = 0;
             if (s_scroll > max_scroll) s_scroll = max_scroll;
         }
@@ -494,7 +673,7 @@ void browser_render(SDL_Renderer *ren) {
     SDL_SetRenderDrawColor(ren, 70, 70, 70, 255);
     SDL_RenderDrawRect(ren, &bg);
 
-    // Title bar
+    // Title bar (shows filter when active)
     SDL_Rect title_bg = {px, py, panel_w, kTitleH};
     SDL_SetRenderDrawColor(ren, 38, 38, 38, 255);
     SDL_RenderFillRect(ren, &title_bg);
@@ -503,20 +682,22 @@ void browser_render(SDL_Renderer *ren) {
 
     SDL_Color title_col = {220, 220, 220, 255};
     SDL_Color dim_col = {160, 160, 160, 255};
-    char title[PATH_MAX + 32];
-    snprintf(title, sizeof(title), " %s", s_root);
-    // Clip title to panel width
-    int max_title_chars = (panel_w - 20) / 8;
-    if ((int)strlen(title) > max_title_chars) {
-        // Show ellipsis for long paths
-        const char *ellipsis = "...";
-        int keep = max_title_chars - 3;
-        if (keep < 10) keep = 10;
-        char tmp[PATH_MAX + 32];
-        snprintf(tmp, sizeof(tmp), "...%s", s_root + strlen(s_root) - keep);
-        strncpy(title, tmp, sizeof(title) - 1);
+    char title_buf[PATH_MAX + 64];
+    if (s_filter[0] != '\0') {
+        snprintf(title_buf, sizeof(title_buf), " %s  [filter: %s]", s_root, s_filter);
+    } else {
+        snprintf(title_buf, sizeof(title_buf), " %s", s_root);
     }
-    text_draw(ren, px + 8, py + 9, title, title_col, 1);
+    int max_title_chars2 = (panel_w - 20) / 8;
+    if ((int)strlen(title_buf) > max_title_chars2) {
+        int keep = max_title_chars2 - 3;
+        if (keep < 10) keep = 10;
+        char tmp2[PATH_MAX + 64];
+        snprintf(tmp2, sizeof(tmp2), "...%s", title_buf + strlen(title_buf) - keep);
+        strncpy(title_buf, tmp2, sizeof(title_buf)-1);
+        title_buf[sizeof(title_buf)-1] = '\0';
+    }
+    text_draw(ren, px + 8, py + 9, title_buf, title_col, 1);
 
     // List area
     int list_y = py + kTitleH;
@@ -524,12 +705,25 @@ void browser_render(SDL_Renderer *ren) {
     int visible = list_h / kRowH;
     clamp_scroll(visible);
 
+    // If filtered and no matches, show message
+    int fcount = filtered_count();
+    if (s_filter[0] != '\0' && fcount == 0) {
+        SDL_Rect clip2 = {px, list_y, panel_w, list_h};
+        SDL_RenderSetClipRect(ren, &clip2);
+        SDL_Color dim = {160,160,160,255};
+        text_draw(ren, px+12, list_y+8, "No matches", dim, 1);
+        SDL_RenderSetClipRect(ren, NULL);
+    }
+
     SDL_Rect clip = {px, list_y, panel_w, list_h};
     SDL_RenderSetClipRect(ren, &clip);
 
     for (int i = 0; i < visible; i++) {
-        int idx = s_scroll + i;
-        if (idx >= s_count) break;
+        int f_idx = s_scroll + i;
+        int idx;
+        if (s_filter[0] == '\0') idx = f_idx;
+        else idx = filtered_to_real(f_idx);
+        if (idx < 0 || idx >= s_count) break;
         BrowserEntry *e = &s_entries[idx];
         int row_y = list_y + i * kRowH;
 

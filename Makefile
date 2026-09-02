@@ -8,9 +8,9 @@ DATADIR ?= $(PREFIX)/share
 DESKTOPDIR ?= $(DATADIR)/applications
 
 TARGET  := viewer
-SRC     := main.c viewer.c browser.c text.c
+SRC     := main.c viewer.c browser.c text.c exif.c clipboard.c
 OBJ     := $(SRC:.c=.o)
-HEADERS := viewer.h browser.h text.h stb_image.h font8x8.h
+HEADERS := viewer.h browser.h text.h exif.h clipboard.h stb_image.h stb_image_write.h font8x8.h
 
 all: $(TARGET)
 

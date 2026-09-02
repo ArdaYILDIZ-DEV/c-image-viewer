@@ -54,6 +54,7 @@ extern float g_free_zoom[2], g_free_pan_x[2], g_free_pan_y[2];
 
 extern bool g_show_info;
 extern bool g_show_help;
+extern bool g_show_metadata;
 
 // Directory navigation (current image's folder)
 extern char **g_file_list;
@@ -97,3 +98,5 @@ bool viewer_go_parent(void);
 void viewer_render(SDL_Renderer *ren);
 void viewer_render_info_bar(SDL_Renderer *ren);
 void viewer_render_help(SDL_Renderer *ren);
+void viewer_render_metadata(SDL_Renderer *ren);
+void viewer_toggle_metadata(void);

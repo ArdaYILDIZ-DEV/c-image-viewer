@@ -12,10 +12,15 @@
  *   3. Global actions (quit, help) are handled last.
  */
 
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include "viewer.h"
 #include "browser.h"
+#include "clipboard.h"
 
 #include <SDL2/SDL.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -39,12 +44,16 @@ static void print_usage(const char *prog) {
         "  + / -              Zoom in/out\n"
         "  f / F11            Toggle fullscreen\n"
         "  i                  Toggle info bar\n"
+        "  e                  Toggle metadata (EXIF)\n"
         "  h / ?              Toggle help\n"
         "  s                  Toggle sync\n"
         "  Tab                Switch active pane (when unsynced)\n"
         "  n / Right / PgDn   Next image in folder\n"
         "  p / Left / PgUp    Previous image\n"
-        "  ESC                Browser / Exit fullscreen / Close help\n"
+        "  Ctrl+C             Copy active image to clipboard\n"
+        "  Ctrl+V             Paste image from clipboard\n"
+        "  Ctrl+F             Browser filter\n"
+        "  ESC                Browser / Exit fullscreen / Close help / Close metadata\n"
         "  q                  Quit\n"
         "  Drag & drop        Drop file onto pane to replace it\n",
         prog);
@@ -213,22 +222,65 @@ int main(int argc, char *argv[]) {
                 viewer_update_title();
                 break;
             }
-            case SDL_KEYDOWN:
+            case SDL_KEYDOWN: {
+                // Handle Ctrl combos globally before other dispatch
+                if (ev.key.keysym.mod & KMOD_CTRL) {
+                    switch (ev.key.keysym.sym) {
+                    case SDLK_c: {
+                        // Copy active pane image to clipboard
+                        int pane = (g_count == 1) ? 0 : g_active;
+                        if (pane < g_count && g_img[pane].path) {
+                            bool ok = clipboard_copy_path(g_img[pane].path);
+                            fprintf(stderr, "Clipboard copy %s: %s\n", g_img[pane].path, ok ? "ok" : "failed (install xclip/wl-copy)");
+                        }
+                        break;
+                    }
+                    case SDLK_v: {
+                        char *tmp = clipboard_paste_to_temp();
+                        if (tmp) {
+                            int pane = (g_count == 1) ? 0 : g_active;
+                            if (viewer_replace_image(pane, tmp)) {
+                                viewer_fit_view();
+                                viewer_update_title();
+                                browser_set_root(g_current_dir);
+                            }
+                            unlink(tmp);
+                            free(tmp);
+                        } else {
+                            fprintf(stderr, "Clipboard paste: no image in clipboard\n");
+                        }
+                        break;
+                    }
+                    case SDLK_f: {
+                        if (!browser_is_open()) browser_toggle();
+                        // Forward to browser to clear/focus filter
+                        browser_handle_key(SDLK_f, KMOD_CTRL);
+                        break;
+                    }
+                    default: break;
+                    }
+                    // Ctrl combos are consumed; still allow browser to handle some like Ctrl+F
+                    if (ev.key.keysym.sym == SDLK_c || ev.key.keysym.sym == SDLK_v || ev.key.keysym.sym == SDLK_f) break;
+                }
                 // Browser gets ESC first when open (handled above)
                 switch (ev.key.keysym.sym) {
                 case SDLK_q:
-                    running = false;
+                    if (!(ev.key.keysym.mod & KMOD_CTRL)) running = false;
                     break;
                 case SDLK_ESCAPE:
                     if (g_show_help) {
                         g_show_help = false;
+                    } else if (g_show_metadata) {
+                        g_show_metadata = false;
                     } else if (g_fullscreen) {
                         viewer_toggle_fullscreen();
                         viewer_update_title();
                     } else {
-                        // Toggle file browser overlay
                         browser_toggle();
                     }
+                    break;
+                case SDLK_e:
+                    if (!(ev.key.keysym.mod & KMOD_CTRL)) viewer_toggle_metadata();
                     break;
                 case SDLK_0:
                     viewer_fit_view();
@@ -301,6 +353,7 @@ int main(int argc, char *argv[]) {
                     // Forward other keys to browser if open (e.g., Up/Down)
                     if (browser_is_open()) browser_handle_key(ev.key.keysym.sym, ev.key.keysym.mod);
                     break;
+                }
                 }
                 break;
             default: break;
