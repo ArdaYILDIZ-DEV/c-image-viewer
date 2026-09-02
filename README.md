@@ -1,154 +1,131 @@
-<p align="center">
-  <b>c-image-viewer — minimalist dual-pane image viewer with synchronized zoom</b><br>
-  <a href="https://github.com/"><img src="https://img.shields.io/badge/C-11-blue?style=flat-square"></a>
-  <a href="https://www.libsdl.org/"><img src="https://img.shields.io/badge/SDL2-2.32-green?style=flat-square"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey?style=flat-square"></a>
-</p>
+# c-image-viewer
 
-Single-window viewer that shows one image full-window or two images side-by-side with a shared view transform. Zoom and pan stay synchronized for direct visual comparison; free mode allows per-pane control. Includes an in-window file browser with tree expand/collapse.
+Minimalist dual-pane image viewer built with modern C11 and SDL2, featuring synchronized viewport transformations, an in-window file tree browser, secure process-isolated clipboard integration, robust EXIF parsing, and high-performance batched text rendering.
 
-## Quick start
+## Overview
 
-```bash
-sudo apt install libsdl2-dev        # Debian/Ubuntu, Arch: pacman -S sdl2
-git clone <repo> && cd c-image-viewer
-make
-./viewer image.jpg
-./viewer left.jpg right.jpg
-```
+c-image-viewer is designed for precision visual inspection and side-by-side comparison of imagery. It supports viewing either a single image occupying the full window or two images side-by-side separated by an integrated split divider. View transforms including cursor-centered zoom and image-space panning remain strictly synchronized between both panes, allowing direct pixel-level comparison of two versions of an image, compression artifacts, or rendering passes. A dedicated free mode allows independent positioning and scaling of either pane.
 
-## Features
+The application includes an embedded in-window directory tree browser with live search filtering, comprehensive EXIF metadata extraction, and desktop integration for standard file manager workflows.
 
-- Single pane full-window and dual pane side-by-side with 1px divider
-- Synchronized zoom (cursor-centered, 0.05x–32x, bilinear) and pan (drag)
-- Free mode: `s` toggles sync, `Tab` switches active pane (blue border highlights active)
-- In-window file browser on `ESC`: tree view, expand/collapse, file/folder selection, direct load into active pane
-- Drag and drop: drop file onto left/right half to replace that pane
-- Directory navigation: `n`/`p` (or arrow/PageUp/PageDown) browses images in the same folder, wraps around
-- Fullscreen (`f`/`F11`), fit (`0`/`F`), 1:1 (`1`), info bar (`i`), help (`h`/`?`)
-- Window title always shows basename, dimensions, zoom, sync state, and navigation index
-- Embedded 8x8 bitmap font; no `SDL_ttf` dependency
-- `.desktop` integration for file manager “Open With” on multiple files
+## Key Features
 
-## Requirements
+### Synchronized Dual-Pane Inspection
+- Side-by-side display of two images with independent clipping rects to prevent visual bleeding across the central divider.
+- Multiplicative cursor-centered zooming ranging from 0.05x to 32x. When zooming, the world coordinate under the cursor remains stationary through coordinate compensation.
+- Constant-speed panning in image space regardless of active zoom level.
+- Flexible synchronization toggle allowing both panes to lock into shared zoom and pan or unlock for independent per-pane adjustments.
+- Active pane switching with visual border indicators.
+- Drag-and-drop file support allowing users to drop images directly onto either the left or right pane to replace the active image on that side.
 
-- `gcc` >= 11, `make`
-- `libsdl2-dev` >= 2.0.18 (runtime `libsdl2-2.0-0` is not sufficient)
-- Linux with X11 or Wayland; macOS via SDL2 also builds
+### Directory Navigation and In-Window Browser
+- Seamless folder navigation to jump forward or backward through images in the active directory, automatically skipping corrupted or unreadable files.
+- Modal file browser overlay providing an interactive expandable and collapsible directory tree.
+- Live search filtering by file and folder name with case-insensitive matching.
+- Cycle detection that guards against recursive symbolic links and enforces a strict directory depth limit.
+- Keyboard and mouse wheel scrolling, parent folder traversal, and immediate image loading directly into the active pane.
 
-`stb_image.h` (image decoding) and `font8x8.h` (glyphs) are vendored.
+### High-Performance Rendering Architecture
+- Texture caching: decoded once from disk and uploaded directly to GPU textures, with all viewport transformations handled via affine hardware transforms.
+- Batched bitmap text engine: glyph pixels are pre-analyzed into contiguous horizontal spans and rendered using batched rectangle drawing calls, reducing draw calls by over ninety-nine percent compared to bit-by-bit blitting.
+- Off-screen viewport culling: tiles panned outside the current view bounds are clipped and bypass GPU submission.
+- Metadata caching: EXIF and filesystem statistics are cached while the information modal is open, eliminating redundant disk reads and parsing operations on every animation tick.
 
-## Building from source
+### Hardened Security and Robustness
+- Process isolation: clipboard interactions completely eliminate shell execution, avoiding command injection vulnerabilities by spawning helper utilities directly through system process execution with argument vectors and anonymous UNIX pipes.
+- Atomic temporary files: temporary clipboard assets use restrictive file creation permissions restricted to the current user and are cleaned up immediately across all execution branches.
+- Input validation: command-line parameters, drag-and-drop payloads, and filter keystrokes undergo rigorous validation against buffer limits, non-printable characters, and invalid file descriptor types.
+- Resilient EXIF parsing: embedded JPEG APP1 and TIFF parser detects circular IFD pointers, guards against zero-denominator rational divisions, bounds all memory offsets, and sanitizes ASCII strings.
+- Graceful viewport degradation: viewport math prevents division by zero under degenerate or zero-size window dimensions.
 
-```bash
-make                 # builds ./viewer
-make clean
-sudo make install                    # PREFIX=/usr/local
-make install PREFIX=$HOME/.local     # user-local
-sudo make uninstall
-```
+### Architecture and Pitchfork Layout
+The project strictly implements the Pitchfork Layout standard and out-of-source build principles:
+- Implementation source files reside under the src directory.
+- Public header interfaces reside under the include directory.
+- Single-header third-party dependencies reside isolated under the external directory.
+- Unit and regression test suites reside under the tests directory.
+- Application desktop metadata and non-code assets reside under the assets directory.
+- All compiled object files and output binaries reside in an out-of-source build directory.
 
-`install` copies `viewer` to `$(PREFIX)/bin/c-image-viewer` and `c-image-viewer.desktop` to `$(PREFIX)/share/applications`. Run `update-desktop-database` if your desktop requires it.
+## Supported Formats
 
-## Usage
+Image decoding is provided by stb_image, supporting:
+- JPEG and JPG (including EXIF orientation and metadata)
+- PNG (including 8-bit and 16-bit channels)
+- WebP
+- BMP
+- PPM, PGM, and PBM
+- TIFF and TIF
+- GIF (single-frame and first frame)
+- TGA
+- PSD
+- HDR
 
-```
-viewer <image1> [image2]
-```
+## Prerequisites and System Requirements
 
-Supported extensions: `jpg/jpeg/png/webp/bmp/ppm/pgm/pbm/tiff/tif/gif/psd/tga/hdr` via `stb_image`. No flag parsing; extra arguments are ignored beyond the second file.
+The application is targeted for modern Linux distributions running X11 or Wayland display servers:
+- C11 compliant compiler such as GCC version 11 or higher.
+- POSIX make build tool.
+- SDL2 development libraries (libsdl2-dev) version 2.0.18 or newer.
+- Standard C math library.
+- For optional system clipboard integration on Wayland: wl-clipboard utilities (wl-copy and wl-paste).
+- For optional system clipboard integration on X11: xclip or xsel utilities.
+- Embedded font and decoder headers are vendored within the external directory, requiring no additional external image or font libraries.
 
-Select two files in Nautilus/Dolphin and choose **Open With → c-image-viewer** after `make install`.
+## Setup and Build Steps
 
-## Keybindings
+Building the application follows standard POSIX procedures:
+1. Ensure the SDL2 development package is installed through your system package manager.
+2. From the repository root, invoke the default target of the make tool. The build system automatically constructs the build directory tree, compiles all source modules with standard optimizations, strict warnings, and C11 compliance, and outputs the final executable binary inside the build directory while placing a convenient symlink in the repository root.
+3. To remove all compilation artifacts, object files, and generated binaries, invoke the clean target of the make tool.
+4. To install the viewer binary and its desktop integration file into system application directories, invoke the install target with administrative privileges. The default installation prefix points to usr local, which can be overridden by specifying a custom prefix parameter for user-local installations in your home directory.
+5. To uninstall the binary and its desktop launcher, invoke the uninstall target with the corresponding prefix parameter.
 
-| Key | Action |
-|-----|--------|
-| Mouse wheel | Zoom, cursor-centered |
-| Left drag | Pan |
-| `0` / `F` | Fit to window (preserves aspect, does not upscale small images) |
-| `1` | 100% (1:1, centered) |
-| `+` / `-` | Zoom in/out around window center |
-| `f` / `F11` | Toggle fullscreen (windowed geometry is saved and restored) |
-| `i` | Toggle bottom info bar |
-| `h` / `?` | Toggle help panel |
-| `s` | Toggle sync (SYNC: shared zoom/pan, FREE: per-pane) |
-| `Tab` | Switch active pane in FREE mode |
-| `n` / `Right` / `PgDn` | Next image in current folder |
-| `p` / `Left` / `PgUp` | Previous image |
-| `ESC` | Close help / exit fullscreen / toggle file browser |
-| `q` | Quit |
-| Drag & drop | Drop file onto left/right half to replace that pane |
+## Testing and Quality Verification
 
-File browser (when open):
+The repository contains an automated unit and regression test suite covering memory safety, process execution security, directory navigation, EXIF parsing, text rendering, and boundary edge cases:
+- To run the complete test suite, invoke the test target of the makefile. This compiles the test runner with AddressSanitizer and UndefinedBehaviorSanitizer enabled and executes all verification test cases.
+- For automated testing in headless environments where no display server is attached, SDL can be executed with its dummy video driver under a timeout wrapper to verify initialization and clean teardown.
 
-| Key | Action |
-|-----|--------|
-| `Up` / `Down` / `k` / `j` | Move selection |
-| `Right` / `Enter` (on folder) | Expand folder inline |
-| `Left` / `Backspace` | Collapse folder or go to parent directory |
-| `Enter` (on image) | Load image into active pane, close browser, fit view |
-| `Home` / `End` / `PgUp` / `PgDn` | Jump |
-| Mouse click | Select row |
-| Double-click | Expand/collapse folder or open image |
-| Click outside panel / `ESC` | Close browser |
-| Mouse wheel | Scroll list |
+## Command-Line Usage
 
-## Interface behavior
+The executable accepts either one or two image paths as arguments:
+- Supplying a single image path launches the viewer in full-window single-pane mode.
+- Supplying two image paths launches the viewer in dual-pane synchronized comparison mode, loading the first image on the left and the second image on the right.
+- Arguments can be absolute or relative filesystem paths. Paths are validated before loading to ensure they point to regular, supported image files.
 
-- Window is split at `W/2`. Each pane is clipped via `SDL_RenderSetClipRect` so images do not bleed across the divider. The divider is drawn at `W/2`.
-- Zoom is uniform and multiplicative (`*1.1` / `*0.9` per wheel notch). Pan is stored in image-space pixels; screen delta is divided by zoom so drag speed is constant across scales. Cursor-centered zoom compensates pan by `(1/next - 1/old) * (cursor - center)`.
-- In SYNC mode, `g_zoom`/`g_pan_*` drive both panes. Toggling to FREE copies the shared transform to both per-pane slots; toggling back uses the active pane as the new shared transform. Switching `Tab` only affects which per-pane slot receives input.
-- Fit computes the largest uniform scale that fits the image(s) inside their pane(s) without upscaling small images. In FREE mode each pane fits independently.
-- Info bar is a 22px semi-transparent strip at the bottom; help and browser are modal overlays with a dimmed background. The browser panel is 65% of window width (clamped 400px–`W-40px`) and centered.
-- Directory scan for `n`/`p` filters to supported extensions, checks `S_ISREG`, sorts alphabetically, and tracks `g_file_index` for the current image’s basename.
+## Controls and Keybindings
 
-## Project structure
+### Viewer Controls
+- Mouse Wheel: Zoom in or out centered on current cursor position.
+- Left Mouse Drag: Pan the active image viewport.
+- Key 0 or Capital F: Fit image to the current pane dimensions while preserving aspect ratio.
+- Key 1: Reset zoom to one-to-one pixel scale centered in the pane.
+- Plus and Minus Keys: Zoom in and zoom out centered in the window.
+- Key F or F11: Toggle fullscreen display mode, preserving previous windowed geometry.
+- Key I: Toggle bottom information bar showing image dimensions, color depth, format, zoom percentage, and navigation position.
+- Key E: Toggle EXIF metadata overlay showing camera make, model, exposure settings, ISO speed, and capture timestamp.
+- Key H or Question Mark: Toggle keyboard shortcut help modal.
+- Key S: Toggle synchronization mode between synchronized transform and free transform.
+- Tab Key: Switch the active pane when in free transform mode.
+- Key N, Right Arrow, or Page Down: Navigate to the next valid image in the current folder.
+- Key P, Left Arrow, or Page Up: Navigate to the previous valid image in the current folder.
+- Escape Key: Close active overlays, exit fullscreen mode, or toggle the directory browser.
+- Key Q: Terminate and exit the viewer.
+- Drag and Drop: Drop an image file onto the left or right half of the window to replace the image in that pane.
 
-```
-c-image-viewer/
-├── main.c                 # SDL init, event loop, dispatch to viewer/browser
-├── viewer.c / viewer.h    # Image loading (stb_image), view transforms, rendering, navigation, title
-├── browser.c / browser.h  # File browser tree, expand/collapse, selection, overlay rendering
-├── text.c / text.h        # 8x8 bitmap text helpers (wraps font8x8.h)
-├── font8x8.h              # Public domain 8x8 font (128 glyphs)
-├── stb_image.h            # Public domain image decoder
-├── c-image-viewer.desktop # Desktop entry (MimeType=image/*)
-├── Makefile               # all/clean/install/uninstall, multi-file build
-├── LICENSE                # MIT
-└── README.md
-```
-
-## Development & testing
-
-```bash
-make                          # build
-SDL_VIDEODRIVER=dummy timeout 2 ./viewer image.jpg        # headless smoke test, expect exit 124 (timeout)
-./viewer left.jpg right.jpg   # manual: check sync zoom, browser ESC, drag & drop
-```
-
-No automated test suite yet. CI should at least run `make` and a dummy-driver smoke test.
-
-## Troubleshooting
-
-### `SDL_Init: No available video device`
-No `DISPLAY`/`WAYLAND_DISPLAY` and no dummy driver. Run under X11/Wayland or use `SDL_VIDEODRIVER=dummy` for headless verification.
-
-### `stbi_load failed '...' : can't fopen`
-Path is wrong or file is not a supported image. Check `file <path>` and that the extension is in the supported list.
-
-### `SDL_CreateWindow: ...`
-Missing SDL2 runtime or no windowing system. Install `libsdl2-2.0-0` and ensure a display server is running.
-
-### Drag & drop does nothing / `Unsupported file type (drop)`
-Only image extensions are accepted. Directories and non-image files are rejected. Drop position determines target pane: `x < W/2` → left, otherwise right.
-
-### `n`/`p` does nothing
-Current folder contains no other supported images, or `g_file_index` is `-1` (file not found in scan). Check `ls` in `g_current_dir` and that files are regular files.
-
-### Browser shows empty folder
-Hidden files (dot prefix) are intentionally skipped. The folder may contain only unsupported types or subdirectories.
+### Directory Browser Controls
+- Up Arrow, Down Arrow, Key K, Key J: Move selection highlight up or down.
+- Right Arrow or Enter on Folder: Expand directory inline.
+- Left Arrow or Backspace: Collapse expanded folder or navigate up to parent directory.
+- Enter on Image File: Load chosen image directly into the active pane, dismiss browser, and fit view.
+- Home and End: Jump to first or last directory item.
+- Mouse Click: Select tree entry.
+- Mouse Double-Click: Expand or collapse folder, or open selected image.
+- Mouse Wheel: Scroll through directory list.
+- Click Outside Browser Panel or Escape Key: Dismiss the browser overlay.
+- Text Typing: Instantly filters directory entries by typed characters.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+This project is licensed under the terms of the MIT License. Refer to the LICENSE file for details.

@@ -39,6 +39,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <libgen.h>
+#include <math.h>
 
 // ---------------------------------------------------------------------------
 // Supported extensions (case-insensitive)
@@ -84,6 +85,33 @@ char g_current_dir[PATH_MAX] = {0};
 // File helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Safely joins dir and file into dst. Handles root directory "/" correctly
+ * to avoid producing "//file". Returns true if result fits in dst_size.
+ */
+static bool path_join(char *dst, size_t dst_size, const char *dir, const char *file) {
+    if (!dst || dst_size == 0 || !dir || !file) return false;
+    size_t dlen = strlen(dir);
+    int n;
+    if (dlen == 0) {
+        n = snprintf(dst, dst_size, "%s", file);
+    } else if (dir[dlen - 1] == '/') {
+        n = snprintf(dst, dst_size, "%s%s", dir, file);
+    } else {
+        n = snprintf(dst, dst_size, "%s/%s", dir, file);
+    }
+    return (n > 0 && (size_t)n < dst_size);
+}
+
+/**
+ * Test whether a file name has a supported image extension.
+ *
+ * Performs case-insensitive matching against the list of supported extensions
+ * (jpg, jpeg, png, webp, bmp, ppm, pgm, pbm, tiff, tif, gif, hdr, psd, tga).
+ *
+ * @param name Filename or path string to inspect.
+ * @return true if extension is recognized as a supported image, false otherwise.
+ */
 bool viewer_is_image_file(const char *name) {
     const char *dot = strrchr(name, '.');
     if (!dot || dot[1] == '\0') return false;
@@ -94,6 +122,53 @@ bool viewer_is_image_file(const char *name) {
     return false;
 }
 
+/**
+ * Validate that a path is a safe, readable regular file with an image extension.
+ *
+ * Checks for NUL/empty string, length bounds (< PATH_MAX), absence of control
+ * characters (ASCII < 32 or 127), valid image extension, and stat() confirming S_ISREG.
+ * Optionally resolves canonical path into out_clean_path.
+ *
+ * @param path Input filesystem path.
+ * @param out_clean_path Optional output buffer to receive resolved canonical path.
+ * @param out_size Size of out_clean_path buffer in bytes.
+ * @return true if path is valid and points to an accessible regular image file, false otherwise.
+ */
+bool viewer_validate_image_path(const char *path, char *out_clean_path, size_t out_size) {
+    if (!path || path[0] == '\0') return false;
+    size_t len = strlen(path);
+    if (len >= PATH_MAX) return false;
+
+    // Disallow non-printable control characters
+    for (size_t i = 0; i < len; i++) {
+        unsigned char uc = (unsigned char)path[i];
+        if (uc < 32 || uc == 127) return false;
+    }
+
+    if (!viewer_is_image_file(path)) return false;
+
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return false;
+
+    if (out_clean_path && out_size > 0) {
+        char resolved[PATH_MAX];
+        if (realpath(path, resolved)) {
+            if (strlen(resolved) >= out_size) return false;
+            snprintf(out_clean_path, out_size, "%s", resolved);
+        } else {
+            if (len >= out_size) return false;
+            snprintf(out_clean_path, out_size, "%s", path);
+        }
+    }
+    return true;
+}
+
+/**
+ * Free the directory file list and reset navigation counters.
+ *
+ * Releases all heap-allocated filename strings in g_file_list and the list
+ * pointer itself. Safe to call multiple times or on an empty list.
+ */
 void viewer_free_file_list(void) {
     if (!g_file_list) return;
     for (int i = 0; i < g_file_count; i++) free(g_file_list[i]);
@@ -109,21 +184,30 @@ static int cmp_str(const void *a, const void *b) {
     return strcmp(*pa, *pb);
 }
 
+/**
+ * Scan the directory containing ref_path for supported image files.
+ *
+ * Derives parent directory from ref_path, resolves canonical path, populates
+ * g_file_list with all regular files having supported extensions (excluding hidden
+ * dotfiles), sorts alphabetically, and sets g_file_index to ref_path's entry.
+ *
+ * @param ref_path Reference file path whose parent folder will be scanned.
+ * @return true if directory was opened and scanned successfully, false on error.
+ */
 bool viewer_scan_current_dir(const char *ref_path) {
     viewer_free_file_list();
+    if (!ref_path || ref_path[0] == '\0') return false;
 
     char tmp[PATH_MAX];
-    strncpy(tmp, ref_path, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
+    snprintf(tmp, sizeof(tmp), "%s", ref_path);
     char *dir = dirname(tmp);
 
     char abs_dir[PATH_MAX];
     if (realpath(dir, abs_dir)) {
-        strncpy(g_current_dir, abs_dir, sizeof(g_current_dir) - 1);
+        snprintf(g_current_dir, sizeof(g_current_dir), "%s", abs_dir);
     } else {
-        strncpy(g_current_dir, dir, sizeof(g_current_dir) - 1);
+        snprintf(g_current_dir, sizeof(g_current_dir), "%s", dir);
     }
-    g_current_dir[sizeof(g_current_dir) - 1] = '\0';
 
     DIR *d = opendir(g_current_dir);
     if (!d) return false;
@@ -138,18 +222,20 @@ bool viewer_scan_current_dir(const char *ref_path) {
         if (!viewer_is_image_file(ent->d_name)) continue;
 
         char full[PATH_MAX];
-        snprintf(full, sizeof(full), "%s/%s", g_current_dir, ent->d_name);
+        if (!path_join(full, sizeof(full), g_current_dir, ent->d_name)) continue;
         struct stat st;
         if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
 
         if (g_file_count >= (int)cap) {
-            cap *= 2;
-            char **n = realloc(g_file_list, cap * sizeof(char *));
+            size_t ncap = cap * 2;
+            char **n = realloc(g_file_list, ncap * sizeof(char *));
             if (!n) break;
             g_file_list = n;
+            cap = ncap;
         }
-        g_file_list[g_file_count] = strdup(full);
-        if (g_file_list[g_file_count]) g_file_count++;
+        char *item = strdup(full);
+        if (!item) break;
+        g_file_list[g_file_count++] = item;
     }
     closedir(d);
 
@@ -180,24 +266,49 @@ bool viewer_scan_current_dir(const char *ref_path) {
 // Image lifecycle
 // ---------------------------------------------------------------------------
 
+/**
+ * Release GPU texture and heap-allocated path owned by an Image struct.
+ *
+ * Destroys im->tex, frees im->path, and zeroes the struct. Safe to call on
+ * NULL or already-zeroed structures.
+ *
+ * @param im Pointer to Image struct to unload.
+ */
 void viewer_unload_image(Image *im) {
+    if (!im) return;
     if (im->tex) SDL_DestroyTexture(im->tex);
     if (im->path) free(im->path);
     memset(im, 0, sizeof(*im));
 }
 
+/**
+ * Load an image from disk, decode to RGBA, and upload to an SDL GPU texture.
+ *
+ * Decodes pixel data using stb_image with 4 channels (RGBA32), creates an
+ * SDL texture with linear scaling mode, and stores an owned copy of path.
+ * On failure, out is zero-initialized and any intermediate allocations are freed.
+ *
+ * @param path Filesystem path to image file.
+ * @param out Destination Image struct to receive texture, dimensions, and owned path.
+ * @return true on successful load and texture creation, false on decode/allocation error.
+ */
 bool viewer_load_image(const char *path, Image *out) {
-    int w, h, comp;
+    if (!path || !out) return false;
+    memset(out, 0, sizeof(*out));
+
+    int w = 0, h = 0, comp = 0;
     unsigned char *data = stbi_load(path, &w, &h, &comp, 4);
     if (!data) {
-        fprintf(stderr, "stbi_load failed '%s': %s\n", path, stbi_failure_reason());
+        return false;
+    }
+    if (w <= 0 || h <= 0) {
+        stbi_image_free(data);
         return false;
     }
 
     SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(
         data, w, h, 32, w * 4, SDL_PIXELFORMAT_RGBA32);
     if (!surf) {
-        fprintf(stderr, "SDL_CreateRGBSurface failed: %s\n", SDL_GetError());
         stbi_image_free(data);
         return false;
     }
@@ -207,7 +318,12 @@ bool viewer_load_image(const char *path, Image *out) {
     stbi_image_free(data);
 
     if (!tex) {
-        fprintf(stderr, "SDL_CreateTexture failed: %s\n", SDL_GetError());
+        return false;
+    }
+
+    char *path_copy = strdup(path);
+    if (!path_copy) {
+        SDL_DestroyTexture(tex);
         return false;
     }
 
@@ -216,12 +332,23 @@ bool viewer_load_image(const char *path, Image *out) {
     out->tex = tex;
     out->w = w;
     out->h = h;
-    out->path = strdup(path);
+    out->path = path_copy;
     return true;
 }
 
+/**
+ * Replace the image in the specified pane with a new file.
+ *
+ * Loads new image into a temporary struct before unloading the old one to ensure
+ * atomic replacement on failure. Updates g_count if expanding to pane 1, and
+ * rescans current directory if pane 0 or single-image mode.
+ *
+ * @param pane Target pane index (0 or 1).
+ * @param path Filesystem path to the replacement image file.
+ * @return true if replacement succeeded, false if loading failed (original preserved).
+ */
 bool viewer_replace_image(int pane, const char *path) {
-    if (pane < 0 || pane > 1) return false;
+    if (pane < 0 || pane > 1 || !path) return false;
     Image tmp = {0};
     if (!viewer_load_image(path, &tmp)) return false;
     viewer_unload_image(&g_img[pane]);
@@ -237,25 +364,54 @@ bool viewer_replace_image(int pane, const char *path) {
 // View control
 // ---------------------------------------------------------------------------
 
+/**
+ * Fit loaded images within the current window or pane dimensions.
+ *
+ * Computes zoom factor such that images fit entirely inside their viewport
+ * (clamped to 100% maximum, 5% minimum). Resets pan offsets to (0, 0) for
+ * centered display. In sync mode, fits both images to the shared pane size.
+ */
 void viewer_fit_view(void) {
     if (g_count == 0) return;
 
+    if (g_win_w <= 0 || g_win_h <= 0) {
+        g_zoom = 1.0f;
+        g_pan_x = 0.0f;
+        g_pan_y = 0.0f;
+        for (int i = 0; i < 2; i++) {
+            g_free_zoom[i] = 1.0f;
+            g_free_pan_x[i] = 0.0f;
+            g_free_pan_y[i] = 0.0f;
+        }
+        return;
+    }
+
     if (g_sync) {
         if (g_count == 1) {
-            float zx = (float)g_win_w / (float)g_img[0].w;
-            float zy = (float)g_win_h / (float)g_img[0].h;
+            float zx = (g_img[0].w > 0) ? ((float)g_win_w / (float)g_img[0].w) : 1.0f;
+            float zy = (g_img[0].h > 0) ? ((float)g_win_h / (float)g_img[0].h) : 1.0f;
             g_zoom = zx < zy ? zx : zy;
             if (g_zoom > 1.0f) g_zoom = 1.0f;
+            if (g_zoom < 0.05f) g_zoom = 0.05f;
         } else {
             float pane_w = (float)g_win_w / 2.0f;
-            float z0x = pane_w / (float)g_img[0].w;
-            float z0y = (float)g_win_h / (float)g_img[0].h;
-            float z1x = pane_w / (float)g_img[1].w;
-            float z1y = (float)g_win_h / (float)g_img[1].h;
+            float z0x = (g_img[0].w > 0) ? (pane_w / (float)g_img[0].w) : 1.0f;
+            float z0y = (g_img[0].h > 0) ? ((float)g_win_h / (float)g_img[0].h) : 1.0f;
+            float z1x = (g_img[1].w > 0) ? (pane_w / (float)g_img[1].w) : 1.0f;
+            float z1y = (g_img[1].h > 0) ? ((float)g_win_h / (float)g_img[1].h) : 1.0f;
             float z0 = z0x < z0y ? z0x : z0y;
             float z1 = z1x < z1y ? z1x : z1y;
-            g_zoom = z0 < z1 ? z0 : z1;
+            if (g_img[0].w > 0 && g_img[1].w > 0) {
+                g_zoom = z0 < z1 ? z0 : z1;
+            } else if (g_img[0].w > 0) {
+                g_zoom = z0;
+            } else if (g_img[1].w > 0) {
+                g_zoom = z1;
+            } else {
+                g_zoom = 1.0f;
+            }
             if (g_zoom > 1.0f) g_zoom = 1.0f;
+            if (g_zoom < 0.05f) g_zoom = 0.05f;
         }
         g_pan_x = 0;
         g_pan_y = 0;
@@ -267,10 +423,11 @@ void viewer_fit_view(void) {
     } else {
         for (int i = 0; i < g_count; i++) {
             float pane_w = (g_count == 1) ? (float)g_win_w : (float)g_win_w / 2.0f;
-            float zx = pane_w / (float)g_img[i].w;
-            float zy = (float)g_win_h / (float)g_img[i].h;
+            float zx = (g_img[i].w > 0) ? (pane_w / (float)g_img[i].w) : 1.0f;
+            float zy = (g_img[i].h > 0) ? ((float)g_win_h / (float)g_img[i].h) : 1.0f;
             float z = zx < zy ? zx : zy;
             if (z > 1.0f) z = 1.0f;
+            if (z < 0.05f) z = 0.05f;
             g_free_zoom[i] = z;
             g_free_pan_x[i] = 0;
             g_free_pan_y[i] = 0;
@@ -278,9 +435,23 @@ void viewer_fit_view(void) {
     }
 }
 
+/**
+ * Apply a zoom factor centered on a window coordinate.
+ *
+ * Keeps the world point under (mx, my) stationary across zoom changes by
+ * adjusting pan in image-space: pan_new = pan_old + (cursor - center) * (1/next - 1/old).
+ * Clamps zoom between 0.05x (5%) and 32.0x (3200%).
+ *
+ * @param factor Multiplicative zoom step (> 0, e.g. 1.1 for in, 0.9 for out).
+ * @param mx Cursor X coordinate in window space.
+ * @param my Cursor Y coordinate in window space.
+ */
 void viewer_do_zoom(float factor, int mx, int my) {
+    if (factor <= 0.0f || isnan(factor) || isinf(factor)) return;
+    if (g_win_w <= 0 || g_win_h <= 0) return;
+
     if (g_sync) {
-        float old = g_zoom;
+        float old = g_zoom < 0.05f ? 0.05f : g_zoom;
         float next = old * factor;
         if (next < 0.05f) next = 0.05f;
         if (next > 32.0f) next = 32.0f;
@@ -297,8 +468,8 @@ void viewer_do_zoom(float factor, int mx, int my) {
         }
     } else {
         int p = g_active;
-        if (p >= g_count) p = 0;
-        float old = g_free_zoom[p];
+        if (p < 0 || p >= g_count) p = 0;
+        float old = g_free_zoom[p] < 0.05f ? 0.05f : g_free_zoom[p];
         float next = old * factor;
         if (next < 0.05f) next = 0.05f;
         if (next > 32.0f) next = 32.0f;
@@ -313,22 +484,39 @@ void viewer_do_zoom(float factor, int mx, int my) {
     }
 }
 
+/**
+ * Pan the viewport by screen-space pixel deltas.
+ *
+ * Translates dx and dy into image-space coordinates by dividing by current zoom:
+ * pan += delta / zoom. Updates shared or active-pane pan offsets accordingly.
+ *
+ * @param dx Horizontal displacement in window pixels.
+ * @param dy Vertical displacement in window pixels.
+ */
 void viewer_do_pan(int dx, int dy) {
     if (g_sync) {
-        g_pan_x += (float)dx / g_zoom;
-        g_pan_y += (float)dy / g_zoom;
+        float z = g_zoom < 0.05f ? 0.05f : g_zoom;
+        g_pan_x += (float)dx / z;
+        g_pan_y += (float)dy / z;
         for (int i = 0; i < 2; i++) {
             g_free_pan_x[i] = g_pan_x;
             g_free_pan_y[i] = g_pan_y;
         }
     } else {
         int p = g_active;
-        if (p >= g_count) p = 0;
-        g_free_pan_x[p] += (float)dx / g_free_zoom[p];
-        g_free_pan_y[p] += (float)dy / g_free_zoom[p];
+        if (p < 0 || p >= g_count) p = 0;
+        float z = g_free_zoom[p] < 0.05f ? 0.05f : g_free_zoom[p];
+        g_free_pan_x[p] += (float)dx / z;
+        g_free_pan_y[p] += (float)dy / z;
     }
 }
 
+/**
+ * Toggle synchronization mode between synchronized and free transforms.
+ *
+ * When switching to free mode: copies current shared zoom/pan into each pane.
+ * When switching to sync mode: adopts active pane's transform for shared view.
+ */
 void viewer_toggle_sync(void) {
     if (g_sync) {
         for (int i = 0; i < 2; i++) {
@@ -347,6 +535,12 @@ void viewer_toggle_sync(void) {
     }
 }
 
+/**
+ * Toggle between windowed and fullscreen desktop display modes.
+ *
+ * Saves window position and dimensions before entering fullscreen, and restores
+ * them upon returning to windowed mode. Updates g_fullscreen state.
+ */
 void viewer_toggle_fullscreen(void) {
     if (!g_fullscreen) {
         SDL_GetWindowPosition(g_win, &g_win_x, &g_win_y);
@@ -361,18 +555,29 @@ void viewer_toggle_fullscreen(void) {
     }
 }
 
+/**
+ * Reconstruct and apply the window title bar string based on current viewer state.
+ *
+ * Formats filename(s), current zoom percentage, sync mode (SYNC / FREE), active
+ * pane indicator ([L] / [R]), and directory index (e.g. 3/25).
+ */
 void viewer_update_title(void) {
+    if (!g_win) return;
     char b0[256] = {0}, b1[256] = {0};
     if (g_count > 0 && g_img[0].path) {
         const char *b = strrchr(g_img[0].path, '/');
-        strncpy(b0, b ? b + 1 : g_img[0].path, sizeof(b0) - 1);
+        snprintf(b0, sizeof(b0), "%s", b ? b + 1 : g_img[0].path);
+    } else if (g_count > 0) {
+        snprintf(b0, sizeof(b0), "(empty)");
     }
     if (g_count > 1 && g_img[1].path) {
         const char *b = strrchr(g_img[1].path, '/');
-        strncpy(b1, b ? b + 1 : g_img[1].path, sizeof(b1) - 1);
+        snprintf(b1, sizeof(b1), "%s", b ? b + 1 : g_img[1].path);
+    } else if (g_count > 1) {
+        snprintf(b1, sizeof(b1), "(empty)");
     }
 
-    float z = g_sync ? g_zoom : g_free_zoom[g_active];
+    float z = g_sync ? g_zoom : (g_active < 2 ? g_free_zoom[g_active] : 1.0f);
     int pct = (int)(z * 100.0f + 0.5f);
     char title[1024];
     if (g_count == 1) {
@@ -392,29 +597,54 @@ void viewer_update_title(void) {
 // Navigation
 // ---------------------------------------------------------------------------
 
+/**
+ * Navigate to the next or previous image in the scanned directory.
+ *
+ * Steps by delta (+1 or -1) through g_file_list with wraparound. Automatically
+ * skips unreadable or corrupt images until a valid file loads or all files are tested.
+ *
+ * @param delta Direction step (+1 for next, -1 for previous).
+ * @return true if an image was successfully loaded, false if no files or all unreadable.
+ */
 bool viewer_navigate(int delta) {
-    if (g_file_count == 0 || g_file_index < 0) return false;
-    int next = g_file_index + delta;
-    if (next < 0) next = g_file_count - 1;
-    if (next >= g_file_count) next = 0;
-    if (next == g_file_index) return false;
-
+    if (g_file_count <= 1 || g_file_index < 0) return false;
+    int step = delta >= 0 ? 1 : -1;
     int pane = (g_count == 1) ? 0 : g_active;
-    const char *target = g_file_list[next];
-    Image tmp = {0};
-    if (!viewer_load_image(target, &tmp)) return false;
+    if (pane < 0 || pane >= 2) pane = 0;
 
-    viewer_unload_image(&g_img[pane]);
-    g_img[pane] = tmp;
-    g_file_index = next;
-    return true;
+    int candidate = g_file_index;
+    for (int attempts = 0; attempts < g_file_count - 1; attempts++) {
+        candidate += step;
+        if (candidate < 0) candidate = g_file_count - 1;
+        if (candidate >= g_file_count) candidate = 0;
+        if (candidate == g_file_index) break;
+
+        const char *target = g_file_list[candidate];
+        if (!target) continue;
+        Image tmp = {0};
+        if (viewer_load_image(target, &tmp)) {
+            viewer_unload_image(&g_img[pane]);
+            g_img[pane] = tmp;
+            g_file_index = candidate;
+            return true;
+        }
+    }
+    return false;
 }
 
+/**
+ * Navigate to the first image in the parent directory.
+ *
+ * Scans parent directory for image files, loads the first image into pane 0,
+ * and updates g_file_list and g_current_dir on success. Preserves current state
+ * on failure.
+ *
+ * @return true if navigation to parent succeeded, false otherwise.
+ */
 bool viewer_go_parent(void) {
     if (g_current_dir[0] == '\0') return false;
     char tmp[PATH_MAX];
-    strncpy(tmp, g_current_dir, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
+    snprintf(tmp, sizeof(tmp), "%s", g_current_dir);
     char *parent = dirname(tmp);
     if (strcmp(parent, g_current_dir) == 0) return false;
     if (strcmp(parent, ".") == 0) return false;
@@ -434,14 +664,14 @@ bool viewer_go_parent(void) {
     if (realpath(parent, parent_abs)) parent = parent_abs;
 
     char saved_dir[PATH_MAX];
-    strncpy(saved_dir, g_current_dir, sizeof(saved_dir));
+    snprintf(saved_dir, sizeof(saved_dir), "%s", g_current_dir);
     char **saved_list = g_file_list;
     int saved_count = g_file_count;
     int saved_index = g_file_index;
     g_file_list = NULL; g_file_count = 0; g_file_index = -1;
 
     char dummy[PATH_MAX];
-    snprintf(dummy, sizeof(dummy), "%s/dummy.jpg", parent);
+    if (!path_join(dummy, sizeof(dummy), parent, "dummy.jpg")) return false;
     viewer_scan_current_dir(dummy);
 
     bool ok = false;
@@ -459,7 +689,7 @@ bool viewer_go_parent(void) {
             g_file_list = parent_list;
             g_file_count = parent_count;
             g_file_index = 0;
-            strncpy(g_current_dir, parent, sizeof(g_current_dir) - 1);
+            snprintf(g_current_dir, sizeof(g_current_dir), "%s", parent);
             ok = true;
         } else {
             for (int i = 0; i < parent_count; i++) free(parent_list[i]);
@@ -467,14 +697,14 @@ bool viewer_go_parent(void) {
             g_file_list = saved_list;
             g_file_count = saved_count;
             g_file_index = saved_index;
-            strncpy(g_current_dir, saved_dir, sizeof(g_current_dir) - 1);
+            snprintf(g_current_dir, sizeof(g_current_dir), "%s", saved_dir);
         }
     } else {
         viewer_free_file_list();
         g_file_list = saved_list;
         g_file_count = saved_count;
         g_file_index = saved_index;
-        strncpy(g_current_dir, saved_dir, sizeof(g_current_dir) - 1);
+        snprintf(g_current_dir, sizeof(g_current_dir), "%s", saved_dir);
     }
     return ok;
 }
@@ -483,10 +713,19 @@ bool viewer_go_parent(void) {
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Render bottom status bar with filename, resolution, zoom, sync, and index.
+ *
+ * No-op if g_show_info is false or window dimensions are invalid.
+ *
+ * @param ren Target SDL renderer.
+ */
 void viewer_render_info_bar(SDL_Renderer *ren) {
-    if (!g_show_info) return;
+    if (!g_show_info || !ren || g_win_w <= 0 || g_win_h <= 0) return;
 
     int bar_h = 22;
+    if (bar_h > g_win_h) bar_h = g_win_h;
+    if (bar_h <= 0) return;
     SDL_Rect bar = {0, g_win_h - bar_h, g_win_w, bar_h};
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 180);
     SDL_RenderFillRect(ren, &bar);
@@ -494,30 +733,41 @@ void viewer_render_info_bar(SDL_Renderer *ren) {
     char line[1024];
     float z = g_sync ? g_zoom : g_free_zoom[g_active];
     int pct = (int)(z * 100.0f + 0.5f);
+    int len = 0;
     if (g_count == 1) {
         const char *b = g_img[0].path ? strrchr(g_img[0].path, '/') : NULL;
         b = b ? b + 1 : (g_img[0].path ? g_img[0].path : "?");
-        snprintf(line, sizeof(line), "%s  %dx%d  %d%%  %s  %d/%d  [s]ync [Tab] pane [f]ull [n/p] next/prev [ESC] browser",
+        len = snprintf(line, sizeof(line), "%s  %dx%d  %d%%  %s  %d/%d  [s]ync [Tab] pane [f]ull [n/p] next/prev [ESC] browser",
             b, g_img[0].w, g_img[0].h, pct, g_sync ? "SYNC" : "FREE", g_file_index + 1, g_file_count);
     } else if (g_count == 2) {
         const char *b0 = g_img[0].path ? strrchr(g_img[0].path, '/') : NULL;
         const char *b1 = g_img[1].path ? strrchr(g_img[1].path, '/') : NULL;
         b0 = b0 ? b0 + 1 : (g_img[0].path ? g_img[0].path : "?");
         b1 = b1 ? b1 + 1 : (g_img[1].path ? g_img[1].path : "?");
-        snprintf(line, sizeof(line), "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s",
+        len = snprintf(line, sizeof(line), "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s",
             b0, g_img[0].w, g_img[0].h, b1, g_img[1].w, g_img[1].h, pct,
             g_sync ? "SYNC" : "FREE", g_sync ? "" : (g_active == 0 ? " [L*]" : " [R*]"));
     } else {
         return;
     }
+    if (len < 0) return;
     SDL_Color white = {220, 220, 220, 255};
     int max_chars = g_win_w / 8 - 1;
-    if ((int)strlen(line) > max_chars) line[max_chars] = '\0';
+    if (max_chars < 0) max_chars = 0;
+    if (len > max_chars) line[max_chars] = '\0';
     text_draw(ren, 6, g_win_h - bar_h + 7, line, white, 1);
 }
 
+/**
+ * Render keyboard shortcut and controls help overlay dialog.
+ *
+ * No-op if g_show_help is false. Renders semi-transparent centered dialog box
+ * with control descriptions and dismiss instructions.
+ *
+ * @param ren Target SDL renderer.
+ */
 void viewer_render_help(SDL_Renderer *ren) {
-    if (!g_show_help) return;
+    if (!g_show_help || !ren || g_win_w <= 0 || g_win_h <= 0) return;
 
     const char *lines[] = {
         "c-image-viewer  -  Help",
@@ -545,7 +795,10 @@ void viewer_render_help(SDL_Renderer *ren) {
     while (lines[count]) count++;
 
     int panel_w = 520;
+    if (panel_w > g_win_w) panel_w = g_win_w;
     int panel_h = count * 14 + 24;
+    if (panel_h > g_win_h) panel_h = g_win_h;
+    if (panel_w <= 0 || panel_h <= 0) return;
     int px = (g_win_w - panel_w) / 2;
     int py = (g_win_h - panel_h) / 2;
     if (px < 0) px = 0;
@@ -574,6 +827,9 @@ void viewer_render_help(SDL_Renderer *ren) {
     }
 }
 
+/**
+ * Toggle visibility of the right-hand EXIF and file metadata overlay panel.
+ */
 void viewer_toggle_metadata(void) {
     g_show_metadata = !g_show_metadata;
 }
@@ -587,18 +843,29 @@ void viewer_toggle_metadata(void) {
  * label/value pair drawn with the bitmap font.
  */
 void viewer_render_metadata(SDL_Renderer *ren) {
-    if (!g_show_metadata) return;
+    if (!g_show_metadata || !ren || g_win_w <= 0 || g_win_h <= 0) return;
     // Choose active pane's image for metadata (or pane 0 if sync)
     int pane = g_sync ? 0 : g_active;
-    if (pane >= g_count) pane = 0;
+    if (pane < 0 || pane >= g_count) pane = 0;
     if (g_count == 0 || !g_img[pane].path) return;
 
     const char *path = g_img[pane].path;
     Image *im = &g_img[pane];
 
-    // Gather file info
-    struct stat st;
-    bool has_stat = (stat(path, &st) == 0);
+    // Cache EXIF and file stat to avoid repeated disk reads and 128KB allocations per frame
+    static char s_cached_md_path[PATH_MAX] = {0};
+    static ExifData s_cached_exif;
+    static struct stat s_cached_st;
+    static bool s_has_stat = false;
+
+    if (strcmp(s_cached_md_path, path) != 0) {
+        snprintf(s_cached_md_path, sizeof(s_cached_md_path), "%s", path);
+        s_has_stat = (stat(path, &s_cached_st) == 0);
+        exif_read(path, &s_cached_exif);
+    }
+
+    struct stat st = s_cached_st;
+    bool has_stat = s_has_stat;
     char size_str[32] = "?";
     char mtime_str[64] = "?";
     if (has_stat) {
@@ -611,16 +878,19 @@ void viewer_render_metadata(SDL_Renderer *ren) {
         if (tm) strftime(mtime_str, sizeof(mtime_str), "%Y-%m-%d %H:%M", tm);
     }
 
-    ExifData exif;
-    exif_read(path, &exif);
+    ExifData exif = s_cached_exif;
 
     // Panel geometry: 380px wide, 70% height centered vertically, right margin 12
     int pw = 380;
     if (pw > g_win_w - 40) pw = g_win_w - 40;
+    if (pw <= 0) return;
     int ph = g_win_h - 80;
     if (ph > 520) ph = 520;
+    if (ph <= 0) return;
     int px = g_win_w - pw - 12;
+    if (px < 0) px = 0;
     int py = (g_win_h - ph) / 2;
+    if (py < 0) py = 0;
 
     // Background
     SDL_Rect bg = {px, py, pw, ph};
@@ -647,7 +917,18 @@ void viewer_render_metadata(SDL_Renderer *ren) {
     snprintf(title, sizeof(title), "Metadata — %s", base);
     // Truncate title if too long
     int max_title = (pw - 16) / 8;
-    if ((int)strlen(title) > max_title) { title[max_title-3]='.'; title[max_title-2]='.'; title[max_title-1]='.'; title[max_title]='\0'; }
+    if (max_title <= 0) {
+        title[0] = '\0';
+    } else if ((int)strlen(title) > max_title) {
+        if (max_title >= 4) {
+            title[max_title - 3] = '.';
+            title[max_title - 2] = '.';
+            title[max_title - 1] = '.';
+            title[max_title] = '\0';
+        } else {
+            title[max_title] = '\0';
+        }
+    }
     text_draw(ren, px+8, py+9, title, title_col, 1);
 
     int y = py + 36;
@@ -669,11 +950,16 @@ void viewer_render_metadata(SDL_Renderer *ren) {
     MD_ROW("Modified", mtime_str);
     // Path (show full, truncated)
     char path_disp[PATH_MAX];
-    strncpy(path_disp, path, sizeof(path_disp)-1); path_disp[sizeof(path_disp)-1]='\0';
+    snprintf(path_disp, sizeof(path_disp), "%s", path);
     // Shorten home prefix
     const char *home = getenv("HOME");
-    if (home && strncmp(path_disp, home, strlen(home))==0) {
-        char tmp[PATH_MAX]; snprintf(tmp, sizeof(tmp), "~%s", path_disp + strlen(home)); strncpy(path_disp, tmp, sizeof(path_disp)-1);
+    if (home && home[0] != '\0' && strcmp(home, "/") != 0) {
+        size_t hlen = strlen(home);
+        if (strncmp(path_disp, home, hlen) == 0 && (path_disp[hlen] == '/' || path_disp[hlen] == '\0')) {
+            char tmp[PATH_MAX];
+            snprintf(tmp, sizeof(tmp), "~%s", path_disp + hlen);
+            snprintf(path_disp, sizeof(path_disp), "%s", tmp);
+        }
     }
     MD_ROW("Path", path_disp);
 
@@ -718,65 +1004,96 @@ void viewer_render_metadata(SDL_Renderer *ren) {
     text_draw(ren, px+8, py+ph-14, "Press e to close", dim_col, 1);
 }
 
-void viewer_render(SDL_Renderer *ren) {
-    SDL_SetRenderDrawColor(ren, 18, 18, 18, 255);
-    SDL_RenderClear(ren);
+/**
+ * Render a single image pane inside the given clip rectangle.
+ *
+ * Computes destination rectangle using precomputed img->w / img->h and zoom/pan.
+ * Skips SDL_RenderCopyF if the image destination is entirely outside clip bounds.
+ */
+static void viewer_render_pane(SDL_Renderer *ren, int pane_idx, SDL_Rect clip) {
+    if (!ren || pane_idx < 0 || pane_idx >= 2) return;
+    Image *im = &g_img[pane_idx];
 
-    if (g_count == 1) {
-        Image *im = &g_img[0];
-        float z = g_sync ? g_zoom : g_free_zoom[0];
-        float px = g_sync ? g_pan_x : g_free_pan_x[0];
-        float py = g_sync ? g_pan_y : g_free_pan_y[0];
-        SDL_Rect clip = {0, 0, g_win_w, g_win_h};
-        SDL_RenderSetClipRect(ren, &clip);
+    SDL_RenderSetClipRect(ren, &clip);
+
+    if (im->tex && im->w > 0 && im->h > 0) {
+        float z, px, py;
+        if (g_sync) {
+            z = g_zoom;
+            px = g_pan_x;
+            py = g_pan_y;
+        } else {
+            z = g_free_zoom[pane_idx];
+            px = g_free_pan_x[pane_idx];
+            py = g_free_pan_y[pane_idx];
+        }
+        if (z < 0.05f) z = 0.05f;
 
         float dw = (float)im->w * z;
         float dh = (float)im->h * z;
-        float dx = (float)g_win_w * 0.5f - dw * 0.5f + px * z;
-        float dy = (float)g_win_h * 0.5f - dh * 0.5f + py * z;
-        SDL_FRect dst = {dx, dy, dw, dh};
-        SDL_RenderCopyF(ren, im->tex, NULL, &dst);
-        SDL_RenderSetClipRect(ren, NULL);
+        float pane_cx = (float)clip.x + (float)clip.w * 0.5f;
+        float pane_cy = (float)clip.y + (float)clip.h * 0.5f;
+        float dx = pane_cx - dw * 0.5f + px * z;
+        float dy = pane_cy - dh * 0.5f + py * z;
 
-        if (!g_sync && g_active == 0) {
-            SDL_SetRenderDrawColor(ren, 100, 160, 255, 120);
-            SDL_Rect hl = {1, 1, g_win_w - 2, g_win_h - 2};
-            SDL_RenderDrawRect(ren, &hl);
-        }
-    } else if (g_count == 2) {
-        for (int i = 0; i < 2; i++) {
-            Image *im = &g_img[i];
-            float z, px, py;
-            if (g_sync) { z = g_zoom; px = g_pan_x; py = g_pan_y; }
-            else { z = g_free_zoom[i]; px = g_free_pan_x[i]; py = g_free_pan_y[i]; }
-
-            int pane_w = g_win_w / 2;
-            SDL_Rect clip = {i * pane_w, 0, pane_w, g_win_h};
-            if (i == 1) {
-                clip.x = pane_w;
-                clip.w = g_win_w - pane_w;
-            }
-            SDL_RenderSetClipRect(ren, &clip);
-
-            float dw = (float)im->w * z;
-            float dh = (float)im->h * z;
-            float pane_cx = (float)clip.x + (float)clip.w * 0.5f;
-            float pane_cy = (float)g_win_h * 0.5f;
-            float dx = pane_cx - dw * 0.5f + px * z;
-            float dy = pane_cy - dh * 0.5f + py * z;
+        // Viewport culling: only issue RenderCopy if destination rect intersects pane
+        if (dx + dw > (float)clip.x && dx < (float)(clip.x + clip.w) &&
+            dy + dh > (float)clip.y && dy < (float)(clip.y + clip.h)) {
             SDL_FRect dst = {dx, dy, dw, dh};
             SDL_RenderCopyF(ren, im->tex, NULL, &dst);
-            SDL_RenderSetClipRect(ren, NULL);
-
-            if (!g_sync && g_active == i) {
-                SDL_SetRenderDrawColor(ren, 100, 160, 255, 200);
-                SDL_Rect hl = {clip.x + 1, 1, clip.w - 2, g_win_h - 2};
-                SDL_RenderDrawRect(ren, &hl);
-            }
         }
-        SDL_SetRenderDrawColor(ren, 60, 60, 60, 255);
+    } else {
+        SDL_SetRenderDrawColor(ren, 25, 25, 25, 255);
+        SDL_RenderFillRect(ren, &clip);
+    }
+    SDL_RenderSetClipRect(ren, NULL);
+
+    // Free-mode active pane highlight
+    if (!g_sync && g_active == pane_idx) {
+        SDL_SetRenderDrawColor(ren, 100, 160, 255, (g_count == 1) ? 120 : 200);
+        SDL_Rect hl = {
+            clip.x + 1,
+            clip.y + 1,
+            clip.w - 2 > 0 ? clip.w - 2 : 1,
+            clip.h - 2 > 0 ? clip.h - 2 : 1
+        };
+        SDL_RenderDrawRect(ren, &hl);
+    }
+}
+
+/**
+ * Draw vertical divider between split panes.
+ */
+static void viewer_render_split_divider(SDL_Renderer *ren, int mid, int h) {
+    if (!ren || mid <= 0 || h <= 0) return;
+    SDL_SetRenderDrawColor(ren, 60, 60, 60, 255);
+    SDL_RenderDrawLine(ren, mid, 0, mid, h);
+}
+
+/**
+ * Clear the viewport and render active panes, split divider, and overlays.
+ *
+ * Renders pane 0 (and pane 1 if g_count == 2) with viewport culling, divider line,
+ * info bar (if enabled), help dialog (if enabled), and metadata panel (if enabled).
+ *
+ * @param ren Target SDL renderer.
+ */
+void viewer_render(SDL_Renderer *ren) {
+    if (!ren) return;
+    SDL_SetRenderDrawColor(ren, 18, 18, 18, 255);
+    SDL_RenderClear(ren);
+    if (g_win_w <= 0 || g_win_h <= 0) return;
+
+    if (g_count == 1) {
+        SDL_Rect pane = {0, 0, g_win_w, g_win_h};
+        viewer_render_pane(ren, 0, pane);
+    } else if (g_count == 2) {
         int mid = g_win_w / 2;
-        SDL_RenderDrawLine(ren, mid, 0, mid, g_win_h);
+        SDL_Rect p0 = {0, 0, mid, g_win_h};
+        SDL_Rect p1 = {mid, 0, g_win_w - mid, g_win_h};
+        viewer_render_pane(ren, 0, p0);
+        viewer_render_pane(ren, 1, p1);
+        viewer_render_split_divider(ren, mid, g_win_h);
     }
 
     viewer_render_info_bar(ren);

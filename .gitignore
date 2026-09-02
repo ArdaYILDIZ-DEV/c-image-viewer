@@ -1,4 +1,6 @@
+/build/
 viewer
+test_runner
 *.o
 *.ppm
 .DS_Store

@@ -76,6 +76,7 @@ static int s_last_click_idx = -1;
 
 // Filter state: incremental search within visible entries
 static char s_filter[256] = {0};
+static size_t s_filter_len = 0;
 static bool s_filtering = false; // true when filter has content
 
 // Layout constants
@@ -88,12 +89,16 @@ static const int kFooterH = 20;
 // Helpers
 // ---------------------------------------------------------------------------
 
-static void ensure_cap(int needed) {
-    if (needed <= s_cap) return;
+static bool ensure_cap(int needed) {
+    if (needed <= s_cap) return true;
     int ncap = s_cap ? s_cap * 2 : 64;
-    while (ncap < needed) ncap *= 2;
-    BrowserEntry *n = realloc(s_entries, ncap * sizeof(BrowserEntry));
-    if (n) { s_entries = n; s_cap = ncap; }
+    while (ncap < needed && ncap > 0) ncap *= 2;
+    if (ncap < needed) ncap = needed;
+    BrowserEntry *n = realloc(s_entries, (size_t)ncap * sizeof(BrowserEntry));
+    if (!n) return false;
+    s_entries = n;
+    s_cap = ncap;
+    return true;
 }
 
 static int entry_cmp(const void *a, const void *b) {
@@ -110,25 +115,26 @@ static int entry_cmp(const void *a, const void *b) {
 // Filter helpers (case-insensitive substring)
 // ---------------------------------------------------------------------------
 
-static bool strcasestr_simple(const char *haystack, const char *needle) {
-    if (!needle || needle[0] == '\0') return true;
-    size_t nlen = strlen(needle);
+static bool strcasestr_fast(const char *haystack, const char *needle, size_t needle_len) {
+    if (needle_len == 0) return true;
+    if (!haystack) return false;
     size_t hlen = strlen(haystack);
-    if (nlen > hlen) return false;
-    for (size_t i = 0; i <= hlen - nlen; i++) {
-        if (strncasecmp(haystack + i, needle, nlen) == 0) return true;
+    if (needle_len > hlen) return false;
+    for (size_t i = 0; i <= hlen - needle_len; i++) {
+        if (strncasecmp(haystack + i, needle, needle_len) == 0) return true;
     }
     return false;
 }
 
 static bool matches_filter(const BrowserEntry *e) {
-    if (s_filter[0] == '\0') return true;
-    return strcasestr_simple(e->name, s_filter);
+    if (s_filter_len == 0) return true;
+    if (!e) return false;
+    return strcasestr_fast(e->name, s_filter, s_filter_len);
 }
 
 // Count visible entries matching filter (for scroll calculations)
 static int filtered_count(void) {
-    if (s_filter[0] == '\0') return s_count;
+    if (s_filter_len == 0) return s_count;
     int c = 0;
     for (int i = 0; i < s_count; i++) if (matches_filter(&s_entries[i])) c++;
     return c;
@@ -136,7 +142,8 @@ static int filtered_count(void) {
 
 // Convert filtered index to real index (0-based among visible)
 static int filtered_to_real(int filtered_idx) {
-    if (s_filter[0] == '\0') return filtered_idx;
+    if (filtered_idx < 0) return -1;
+    if (s_filter_len == 0) return (filtered_idx < s_count) ? filtered_idx : -1;
     int cur = -1;
     for (int i = 0; i < s_count; i++) {
         if (matches_filter(&s_entries[i])) {
@@ -149,7 +156,7 @@ static int filtered_to_real(int filtered_idx) {
 
 // Convert real index to filtered index, or -1 if not visible
 static int real_to_filtered(int real_idx) {
-    if (s_filter[0] == '\0') return real_idx;
+    if (s_filter_len == 0) return real_idx;
     if (real_idx < 0 || real_idx >= s_count) return -1;
     if (!matches_filter(&s_entries[real_idx])) return -1;
     int c = 0;
@@ -168,10 +175,89 @@ static int prev_visible(int real_idx) {
 }
 static void clear_filter(void) {
     s_filter[0] = '\0';
+    s_filter_len = 0;
     s_filtering = false;
 }
 static void update_filter_active(void) {
-    s_filtering = (s_filter[0] != '\0');
+    s_filter_len = strlen(s_filter);
+    s_filtering = (s_filter_len > 0);
+}
+
+/**
+ * Retrieve the current filter string.
+ *
+ * @return Const pointer to the internal NUL-terminated filter buffer.
+ */
+const char *browser_get_filter(void) {
+    return s_filter;
+}
+
+/**
+ * Clear the active incremental search filter string.
+ *
+ * Resets the filter buffer to empty and marks filtering inactive without
+ * altering directory expansion state.
+ */
+void browser_clear_filter(void) {
+    clear_filter();
+}
+
+/**
+ * Append a character to the incremental search filter buffer.
+ *
+ * Validates that c is a printable ASCII character (32..126) and that buffer
+ * capacity is not exceeded. Updates the active filter and moves selection
+ * to the first matching entry if the current selection is filtered out.
+ *
+ * @param c Character to append to the filter string.
+ * @return true if character was appended, false if rejected or buffer full.
+ */
+bool browser_filter_add_char(char c) {
+    // Only accept printable ASCII characters (32..126)
+    if (c < 32 || c > 126) return false;
+
+    if (s_filter_len >= sizeof(s_filter) - 1) return false;
+
+    s_filter[s_filter_len] = c;
+    s_filter_len++;
+    s_filter[s_filter_len] = '\0';
+    s_filtering = true;
+
+    if (s_selected >= 0 && s_selected < s_count && !matches_filter(&s_entries[s_selected])) {
+        // Move to first matching entry
+        for (int i = 0; i < s_count; i++) {
+            if (matches_filter(&s_entries[i])) {
+                s_selected = i;
+                break;
+            }
+        }
+    }
+    return true;
+}
+
+/**
+ * Safely joins dir and file into dst using direct memory copies.
+ * Avoids snprintf format parsing overhead and repeated strlen scans.
+ * Handles root directory "/" correctly to avoid producing "//file".
+ * Returns true if result fits in dst_size, and optionally sets out_len.
+ */
+static bool path_join(char *dst, size_t dst_size, const char *dir, const char *file, size_t *out_len) {
+    if (!dst || dst_size == 0 || !dir || !file) return false;
+    size_t dlen = strlen(dir);
+    size_t flen = strlen(file);
+    bool needs_slash = (dlen > 0 && dir[dlen - 1] != '/');
+    size_t total = dlen + (needs_slash ? 1 : 0) + flen;
+    if (total >= dst_size) return false;
+
+    memcpy(dst, dir, dlen);
+    if (needs_slash) {
+        dst[dlen] = '/';
+        memcpy(dst + dlen + 1, file, flen + 1);
+    } else {
+        memcpy(dst + dlen, file, flen + 1);
+    }
+    if (out_len) *out_len = total;
+    return true;
 }
 
 /**
@@ -180,19 +266,25 @@ static void update_filter_active(void) {
  * include all subdirectories; for files, only supported image extensions.
  */
 static BrowserEntry *scan_dir_entries(const char *dir, int *out_n, int depth) {
-    DIR *d = opendir(dir);
-    if (!d) { *out_n = 0; return NULL; }
+    if (!out_n) return NULL;
+    *out_n = 0;
+    if (!dir || dir[0] == '\0') return NULL;
 
-    int cap = 32, n = 0;
-    BrowserEntry *arr = malloc(cap * sizeof(BrowserEntry));
-    if (!arr) { closedir(d); *out_n = 0; return NULL; }
+    DIR *d = opendir(dir);
+    if (!d) return NULL;
+
+    int cap = 64, n = 0;
+    BrowserEntry *arr = malloc((size_t)cap * sizeof(BrowserEntry));
+    if (!arr) { closedir(d); return NULL; }
 
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
         if (ent->d_name[0] == '.') continue; // Skip hidden
 
+        size_t full_len = 0;
         char full[PATH_MAX];
-        snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name);
+        if (!path_join(full, sizeof(full), dir, ent->d_name, &full_len)) continue;
+
         struct stat st;
         if (stat(full, &st) != 0) continue;
 
@@ -203,47 +295,68 @@ static BrowserEntry *scan_dir_entries(const char *dir, int *out_n, int depth) {
         if (is_file && !viewer_is_image_file(ent->d_name)) continue;
         if (!is_dir && !is_file) continue;
 
+        size_t name_len = strlen(ent->d_name);
+        if (name_len >= sizeof(((BrowserEntry*)0)->name)) continue;
+        if (full_len >= sizeof(((BrowserEntry*)0)->path)) continue;
+
         if (n >= cap) {
-            cap *= 2;
-            BrowserEntry *nn = realloc(arr, cap * sizeof(BrowserEntry));
+            int ncap = cap * 2;
+            BrowserEntry *nn = realloc(arr, (size_t)ncap * sizeof(BrowserEntry));
             if (!nn) break;
             arr = nn;
+            cap = ncap;
         }
         BrowserEntry *e = &arr[n++];
         memset(e, 0, sizeof(*e));
-        strncpy(e->path, full, sizeof(e->path) - 1);
-        strncpy(e->name, ent->d_name, sizeof(e->name) - 1);
+        memcpy(e->path, full, full_len + 1);
+        memcpy(e->name, ent->d_name, name_len + 1);
         e->is_dir = is_dir;
         e->expanded = false;
         e->depth = depth;
     }
     closedir(d);
 
-    if (n > 1) qsort(arr, n, sizeof(BrowserEntry), entry_cmp);
+    if (n == 0) {
+        free(arr);
+        return NULL;
+    }
+
+    if (n > 1) qsort(arr, (size_t)n, sizeof(BrowserEntry), entry_cmp);
     *out_n = n;
     return arr;
 }
 
 static void rebuild_root(const char *root) {
-    // Free old list
-    free(s_entries);
-    s_entries = NULL;
     s_count = 0;
-    s_cap = 0;
     s_selected = 0;
     s_scroll = 0;
 
-    if (!root || root[0] == '\0') return;
-    strncpy(s_root, root, sizeof(s_root) - 1);
-    s_root[sizeof(s_root) - 1] = '\0';
+    if (!root || root[0] == '\0') {
+        s_root[0] = '\0';
+        return;
+    }
+    snprintf(s_root, sizeof(s_root), "%s", root);
 
     int n = 0;
     BrowserEntry *arr = scan_dir_entries(s_root, &n, 0);
-    if (!arr) return;
-    ensure_cap(n);
-    memcpy(s_entries, arr, n * sizeof(BrowserEntry));
-    s_count = n;
+    if (!arr || n <= 0) return;
+    if (ensure_cap(n) && s_entries) {
+        memcpy(s_entries, arr, (size_t)n * sizeof(BrowserEntry));
+        s_count = n;
+    }
     free(arr);
+}
+
+/**
+ * Find the parent index of the entry at idx (nearest entry with depth = entry.depth -1)
+ */
+static int find_parent(int idx) {
+    if (idx <= 0 || idx >= s_count) return -1;
+    int d = s_entries[idx].depth;
+    for (int i = idx - 1; i >= 0; i--) {
+        if (s_entries[i].depth == d - 1) return i;
+    }
+    return -1;
 }
 
 /**
@@ -252,24 +365,48 @@ static void rebuild_root(const char *root) {
  */
 static bool expand_entry(int idx) {
     if (idx < 0 || idx >= s_count) return false;
-    BrowserEntry *e = &s_entries[idx];
-    if (!e->is_dir || e->expanded) return false;
+    if (!s_entries[idx].is_dir || s_entries[idx].expanded) return false;
+    if (s_entries[idx].depth >= 32) return false;
+
+    char dir_path[PATH_MAX];
+    snprintf(dir_path, sizeof(dir_path), "%s", s_entries[idx].path);
+
+    struct stat target_st;
+    if (stat(dir_path, &target_st) != 0) return false;
+
+    // Detect symlink loops by checking ancestors
+    int anc = find_parent(idx);
+    while (anc >= 0) {
+        struct stat anc_st;
+        if (stat(s_entries[anc].path, &anc_st) == 0) {
+            if (anc_st.st_ino == target_st.st_ino && anc_st.st_dev == target_st.st_dev) {
+                return false; // loop detected
+            }
+        }
+        anc = find_parent(anc);
+    }
+
+    int parent_depth = s_entries[idx].depth;
 
     int n = 0;
-    BrowserEntry *children = scan_dir_entries(e->path, &n, e->depth + 1);
+    BrowserEntry *children = scan_dir_entries(dir_path, &n, parent_depth + 1);
     if (!children || n == 0) {
         free(children);
         // Mark expanded even if empty to avoid retry
-        e->expanded = true;
+        s_entries[idx].expanded = true;
         return true;
     }
 
-    ensure_cap(s_count + n);
+    if (!ensure_cap(s_count + n)) {
+        free(children);
+        return false;
+    }
+
     // Shift tail after idx
-    memmove(&s_entries[idx + 1 + n], &s_entries[idx + 1], (s_count - idx - 1) * sizeof(BrowserEntry));
-    memcpy(&s_entries[idx + 1], children, n * sizeof(BrowserEntry));
+    memmove(&s_entries[idx + 1 + n], &s_entries[idx + 1], (size_t)(s_count - idx - 1) * sizeof(BrowserEntry));
+    memcpy(&s_entries[idx + 1], children, (size_t)n * sizeof(BrowserEntry));
     s_count += n;
-    e->expanded = true;
+    s_entries[idx].expanded = true;
     free(children);
     return true;
 }
@@ -299,22 +436,16 @@ static bool collapse_entry(int idx) {
     return true;
 }
 
-/**
- * Find the parent index of the entry at idx (nearest entry with depth = entry.depth -1)
- */
-static int find_parent(int idx) {
-    if (idx <= 0 || idx >= s_count) return -1;
-    int d = s_entries[idx].depth;
-    for (int i = idx - 1; i >= 0; i--) {
-        if (s_entries[i].depth == d - 1) return i;
-    }
-    return -1;
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
+/**
+ * Initialize file browser overlay state with viewer's current directory.
+ *
+ * Safe to call multiple times; queries viewer's g_current_dir (or falls back
+ * to getcwd()) and populates immediate directory entries at depth 0.
+ */
 void browser_init(void) {
     // Initialize from viewer's current directory if available
     if (g_current_dir[0] != '\0') {
@@ -325,14 +456,33 @@ void browser_init(void) {
     }
 }
 
+/**
+ * Set the browser root to a specific directory path and rebuild entries.
+ *
+ * Resolves symlinks via realpath(). Validates that path exists and is a
+ * directory before resetting entries and rebuilding the root listing.
+ *
+ * @param path Target filesystem directory path.
+ */
 void browser_set_root(const char *path) {
-    if (!path) return;
+    if (!path || path[0] == '\0') return;
+    if (strlen(path) >= PATH_MAX) return;
     char abs_path[PATH_MAX];
     const char *use = path;
     if (realpath(path, abs_path)) use = abs_path;
+    struct stat st;
+    if (stat(use, &st) != 0 || !S_ISDIR(st.st_mode)) return;
     rebuild_root(use);
 }
 
+/**
+ * Toggle browser overlay visibility.
+ *
+ * When opening: checks whether g_current_dir has changed externally and
+ * rebuilds the root tree if needed, clears any active search filter, clamps
+ * selection to valid bounds, and starts SDL text input.
+ * When closing: stops SDL text input and hides the overlay.
+ */
 void browser_toggle(void) {
     if (s_open) {
         s_open = false;
@@ -363,9 +513,19 @@ void browser_toggle(void) {
     SDL_StartTextInput();
 }
 
+/**
+ * Query whether the browser overlay is currently visible.
+ *
+ * @return true if the overlay is open, false otherwise.
+ */
 bool browser_is_open(void) { return s_open; }
 
 static void clamp_scroll(int visible_rows) {
+    if (s_count <= 0) {
+        s_scroll = 0;
+        s_selected = 0;
+        return;
+    }
     if (s_filter[0] == '\0') {
         if (s_selected < s_scroll) s_scroll = s_selected;
         if (s_selected >= s_scroll + visible_rows) s_scroll = s_selected - visible_rows + 1;
@@ -376,8 +536,11 @@ static void clamp_scroll(int visible_rows) {
     }
     // Filtered mode: s_scroll is filtered offset, s_selected is real index
     int sel_f = real_to_filtered(s_selected);
-    if (sel_f == -1) return; // selected not visible, keep scroll
     int fcount = filtered_count();
+    if (fcount <= 0 || sel_f == -1) {
+        s_scroll = 0;
+        return;
+    }
     if (sel_f < s_scroll) s_scroll = sel_f;
     if (sel_f >= s_scroll + visible_rows) s_scroll = sel_f - visible_rows + 1;
     if (s_scroll < 0) s_scroll = 0;
@@ -385,6 +548,17 @@ static void clamp_scroll(int visible_rows) {
     if (s_scroll < 0) s_scroll = 0;
 }
 
+/**
+ * Handle keyboard input when the browser overlay is active.
+ *
+ * Intercepts navigation keys (Up/Down/PgUp/PgDn/Home/End), expand/collapse
+ * (Left/Right, Backspace), activation (Return/Space to expand folder or load image),
+ * search filter input (Ctrl+F, Backspace, printable characters), and dismiss (ESC).
+ *
+ * @param key SDL keycode of the pressed key.
+ * @param mod Active SDL key modifier bitmask.
+ * @return true if the key event was consumed by the browser, false otherwise.
+ */
 bool browser_handle_key(SDL_Keycode key, SDL_Keymod mod) {
     if (!s_open) return false;
 
@@ -445,18 +619,7 @@ bool browser_handle_key(SDL_Keycode key, SDL_Keymod mod) {
         }
         // Also allow uppercase via Shift: SDLK_a still reports 'a' but we check shift separately for display
         if (is_printable) {
-            char c = (char)key;
-            // SDLK_a..z are always lower, map shift to upper for display but filter is case-insensitive so lower is fine
-            // Handle shift for symbols would be more complex; keep lower for simplicity and rely on case-insensitive match
-            size_t len = strlen(s_filter);
-            if (len < sizeof(s_filter)-1) {
-                s_filter[len] = c;
-                s_filter[len+1] = '\0';
-                s_filtering = true;
-                if (s_selected >= 0 && s_selected < s_count && !matches_filter(&s_entries[s_selected])) {
-                    // Move to first matching entry
-                    for (int i = 0; i < s_count; i++) if (matches_filter(&s_entries[i])) { s_selected = i; break; }
-                }
+            if (browser_filter_add_char((char)key)) {
                 clamp_scroll(visible);
             }
             return true;
@@ -466,6 +629,7 @@ bool browser_handle_key(SDL_Keycode key, SDL_Keymod mod) {
     switch (key) {
     case SDLK_UP:
     case SDLK_k: {
+        if (s_count <= 0) return true;
         int prev = prev_visible(s_selected);
         if (prev != -1) s_selected = prev;
         else if (s_filter[0] == '\0' && s_selected > 0) s_selected--;
@@ -474,6 +638,7 @@ bool browser_handle_key(SDL_Keycode key, SDL_Keymod mod) {
     }
     case SDLK_DOWN:
     case SDLK_j: {
+        if (s_count <= 0) return true;
         int nxt = next_visible(s_selected);
         if (nxt != -1) s_selected = nxt;
         else if (s_filter[0] == '\0' && s_selected + 1 < s_count) s_selected++;
@@ -481,17 +646,20 @@ bool browser_handle_key(SDL_Keycode key, SDL_Keymod mod) {
         return true;
     }
     case SDLK_HOME: {
+        if (s_count <= 0) { s_selected = 0; s_scroll = 0; return true; }
         // First visible
         for (int i = 0; i < s_count; i++) if (matches_filter(&s_entries[i])) { s_selected = i; break; }
         s_scroll = 0;
         return true;
     }
     case SDLK_END: {
+        if (s_count <= 0) { s_selected = 0; s_scroll = 0; return true; }
         for (int i = s_count-1; i >=0; i--) if (matches_filter(&s_entries[i])) { s_selected = i; break; }
         clamp_scroll(visible);
         return true;
     }
     case SDLK_PAGEUP: {
+        if (s_count <= 0) return true;
         for (int i = 0; i < visible; i++) {
             int prev = prev_visible(s_selected);
             if (prev == -1) break;
@@ -501,6 +669,7 @@ bool browser_handle_key(SDL_Keycode key, SDL_Keymod mod) {
         return true;
     }
     case SDLK_PAGEDOWN: {
+        if (s_count <= 0) return true;
         for (int i = 0; i < visible; i++) {
             int nxt = next_visible(s_selected);
             if (nxt == -1) break;
@@ -520,7 +689,16 @@ bool browser_handle_key(SDL_Keycode key, SDL_Keymod mod) {
         return true;
     case SDLK_LEFT:
     case SDLK_BACKSPACE: {
-        if (s_selected < 0 || s_selected >= s_count) return true;
+        if (s_selected < 0 || s_selected >= s_count) {
+            char tmp[PATH_MAX];
+            snprintf(tmp, sizeof(tmp), "%s", s_root);
+            char *par = dirname(tmp);
+            if (par && strcmp(par, s_root) != 0 && strcmp(par, ".") != 0) {
+                rebuild_root(par);
+                snprintf(g_current_dir, sizeof(g_current_dir), "%s", par);
+            }
+            return true;
+        }
         BrowserEntry *e = &s_entries[s_selected];
         if (e->is_dir && e->expanded) {
             collapse_entry(s_selected);
@@ -534,13 +712,12 @@ bool browser_handle_key(SDL_Keycode key, SDL_Keymod mod) {
             } else {
                 // At top level, go to parent directory
                 char tmp[PATH_MAX];
-                strncpy(tmp, s_root, sizeof(tmp) - 1);
-                tmp[sizeof(tmp) - 1] = '\0';
+                snprintf(tmp, sizeof(tmp), "%s", s_root);
                 char *par = dirname(tmp);
                 if (par && strcmp(par, s_root) != 0 && strcmp(par, ".") != 0) {
                     rebuild_root(par);
                     // Update viewer's dir to reflect navigation (but don't load file yet)
-                    strncpy(g_current_dir, par, sizeof(g_current_dir) - 1);
+                    snprintf(g_current_dir, sizeof(g_current_dir), "%s", par);
                 }
             }
         }
@@ -577,7 +754,17 @@ bool browser_handle_key(SDL_Keycode key, SDL_Keymod mod) {
     }
 }
 
-bool browser_handle_event(SDL_Event *ev) {
+/**
+ * Handle mouse events when the browser overlay is active.
+ *
+ * Consumes clicks within the panel to select entries, double-clicks to
+ * expand/collapse folders or load images into the active pane, mouse wheel
+ * to scroll visible items, and clicks outside the panel bounds to dismiss.
+ *
+ * @param ev Pointer to the SDL event (mouse button, motion, or wheel).
+ * @return true if the event was consumed, false otherwise.
+ */
+bool browser_handle_event(const SDL_Event *ev) {
     if (!s_open) return false;
 
     // Panel geometry (must match browser_render)
@@ -601,7 +788,7 @@ bool browser_handle_event(SDL_Event *ev) {
             return true;
         }
         // Click inside list area (respect filter)
-        if (my >= list_y && my < list_y + list_h) {
+        if (s_count > 0 && my >= list_y && my < list_y + list_h) {
             int row = (my - list_y) / kRowH;
             int f_idx = s_scroll + row;
             int idx;
@@ -634,6 +821,10 @@ bool browser_handle_event(SDL_Event *ev) {
         return true;
     } else if (ev->type == SDL_MOUSEWHEEL) {
         int fcount = (s_filter[0] == '\0') ? s_count : filtered_count();
+        if (fcount <= 0) {
+            s_scroll = 0;
+            return true;
+        }
         if (ev->wheel.y > 0) {
             s_scroll -= 3;
             if (s_scroll < 0) s_scroll = 0;
@@ -651,13 +842,25 @@ bool browser_handle_event(SDL_Event *ev) {
     return false;
 }
 
+/**
+ * Render the file browser overlay onto the target SDL renderer.
+ *
+ * No-op if the browser is closed or window dimensions are invalid.
+ * Renders semi-transparent backdrop, panel border, title bar with path
+ * and active filter query, indented entry list with folder expand indicators,
+ * selection highlight, and footer keyboard shortcut hints.
+ *
+ * @param ren Target SDL renderer.
+ */
 void browser_render(SDL_Renderer *ren) {
-    if (!s_open) return;
+    if (!s_open || !ren || g_win_w <= 0 || g_win_h <= 0) return;
 
     int panel_w = (g_win_w * 65) / 100;
     if (panel_w < 400) panel_w = g_win_w - 2 * kPanelMargin;
     if (panel_w > g_win_w - 2 * kPanelMargin) panel_w = g_win_w - 2 * kPanelMargin;
+    if (panel_w <= 0) return;
     int panel_h = g_win_h - 2 * kPanelMargin;
+    if (panel_h <= 0) return;
     int px = (g_win_w - panel_w) / 2;
     int py = kPanelMargin;
 
@@ -682,20 +885,23 @@ void browser_render(SDL_Renderer *ren) {
 
     SDL_Color title_col = {220, 220, 220, 255};
     SDL_Color dim_col = {160, 160, 160, 255};
-    char title_buf[PATH_MAX + 64];
+    char title_buf[PATH_MAX + 300];
     if (s_filter[0] != '\0') {
         snprintf(title_buf, sizeof(title_buf), " %s  [filter: %s]", s_root, s_filter);
     } else {
         snprintf(title_buf, sizeof(title_buf), " %s", s_root);
     }
     int max_title_chars2 = (panel_w - 20) / 8;
-    if ((int)strlen(title_buf) > max_title_chars2) {
+    if (max_title_chars2 < 4) {
+        title_buf[0] = '\0';
+    } else if ((int)strlen(title_buf) > max_title_chars2) {
         int keep = max_title_chars2 - 3;
-        if (keep < 10) keep = 10;
-        char tmp2[PATH_MAX + 64];
-        snprintf(tmp2, sizeof(tmp2), "...%s", title_buf + strlen(title_buf) - keep);
-        strncpy(title_buf, tmp2, sizeof(title_buf)-1);
-        title_buf[sizeof(title_buf)-1] = '\0';
+        size_t tlen = strlen(title_buf);
+        if (keep > (int)tlen) keep = (int)tlen;
+        if (keep < 0) keep = 0;
+        char tmp2[PATH_MAX + 300];
+        snprintf(tmp2, sizeof(tmp2), "...%s", title_buf + (tlen - (size_t)keep));
+        snprintf(title_buf, sizeof(title_buf), "%s", tmp2);
     }
     text_draw(ren, px + 8, py + 9, title_buf, title_col, 1);
 
@@ -707,7 +913,13 @@ void browser_render(SDL_Renderer *ren) {
 
     // If filtered and no matches, show message
     int fcount = filtered_count();
-    if (s_filter[0] != '\0' && fcount == 0) {
+    if (s_count == 0) {
+        SDL_Rect clip2 = {px, list_y, panel_w, list_h};
+        SDL_RenderSetClipRect(ren, &clip2);
+        SDL_Color dim = {160, 160, 160, 255};
+        text_draw(ren, px + 12, list_y + 8, "(Empty directory)", dim, 1);
+        SDL_RenderSetClipRect(ren, NULL);
+    } else if (s_filter[0] != '\0' && fcount == 0) {
         SDL_Rect clip2 = {px, list_y, panel_w, list_h};
         SDL_RenderSetClipRect(ren, &clip2);
         SDL_Color dim = {160,160,160,255};
@@ -718,11 +930,8 @@ void browser_render(SDL_Renderer *ren) {
     SDL_Rect clip = {px, list_y, panel_w, list_h};
     SDL_RenderSetClipRect(ren, &clip);
 
+    int idx = (s_filter_len == 0) ? s_scroll : filtered_to_real(s_scroll);
     for (int i = 0; i < visible; i++) {
-        int f_idx = s_scroll + i;
-        int idx;
-        if (s_filter[0] == '\0') idx = f_idx;
-        else idx = filtered_to_real(f_idx);
         if (idx < 0 || idx >= s_count) break;
         BrowserEntry *e = &s_entries[idx];
         int row_y = list_y + i * kRowH;
@@ -749,17 +958,15 @@ void browser_render(SDL_Renderer *ren) {
             if (idx == s_selected) pre_col = (SDL_Color){255, 220, 100, 255};
             text_draw(ren, tx, row_y + 5, prefix, pre_col, 1);
             tx += 16;
-            // Folder icon simulation: add slash for dir
-            // Name
             text_draw_clipped(ren, tx, row_y + 5, e->name, name_col, 1, panel_w - (tx - px) - 8);
-            // Trailing slash for clarity
-            // text_draw(ren, tx + (int)strlen(e->name)*8, row_y + 5, "/", name_col, 1);
         } else {
             // File: bullet
             text_draw(ren, tx, row_y + 5, " ", name_col, 1);
             tx += 16;
             text_draw_clipped(ren, tx, row_y + 5, e->name, name_col, 1, panel_w - (tx - px) - 8);
         }
+
+        idx = (s_filter_len == 0) ? idx + 1 : next_visible(idx);
     }
     SDL_RenderSetClipRect(ren, NULL);
 
@@ -779,8 +986,20 @@ void browser_render(SDL_Renderer *ren) {
     SDL_RenderDrawRect(ren, &bg);
 }
 
+/**
+ * Release all allocated heap memory and reset browser state.
+ *
+ * Frees internal entry array, resets counters and scroll offsets, and
+ * closes the overlay. Safe to call multiple times.
+ */
 void browser_cleanup(void) {
     free(s_entries);
     s_entries = NULL;
-    s_count = s_cap = 0;
+    s_count = 0;
+    s_cap = 0;
+    s_selected = 0;
+    s_scroll = 0;
+    s_root[0] = '\0';
+    clear_filter();
+    s_open = false;
 }
