@@ -13,6 +13,91 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+static void test_viewer_truncate_filename(void) {
+    char out[64];
+
+    // Short filename unchanged ("photo.jpg", 24 -> "photo.jpg")
+    viewer_truncate_filename("photo.jpg", out, sizeof(out), 24);
+    TEST_ASSERT_STR_EQ(out, "photo.jpg");
+
+    // Exact length unchanged ("12345678.png", 12 -> "12345678.png")
+    viewer_truncate_filename("12345678.png", out, sizeof(out), 12);
+    TEST_ASSERT_STR_EQ(out, "12345678.png");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 12);
+
+    // Long filename with extension keeps ext ("qweqeqezxdfqwdwqdq.jpg", 18 -> "qweqeqezxdfq...jpg", strlen == 18)
+    viewer_truncate_filename("qweqeqezxdfqwdwqdq.jpg", out, sizeof(out), 18);
+    TEST_ASSERT_STR_EQ(out, "qweqeqezxdfq...jpg");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 18);
+
+    // Long filename without extension ("longnamewithoutanyextension", 12 -> "longnamew...", strlen == 12)
+    viewer_truncate_filename("longnamewithoutanyextension", out, sizeof(out), 12);
+    TEST_ASSERT_STR_EQ(out, "longnamew...");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 12);
+
+    // Edge cases: null and empty name
+    out[0] = 'x';
+    viewer_truncate_filename(NULL, out, sizeof(out), 10);
+    TEST_ASSERT_STR_EQ(out, "");
+
+    out[0] = 'x';
+    viewer_truncate_filename("", out, sizeof(out), 10);
+    TEST_ASSERT_STR_EQ(out, "");
+
+    // Edge cases: null out or zero out_sz (must not crash)
+    viewer_truncate_filename("photo.jpg", NULL, 0, 10);
+    viewer_truncate_filename("photo.jpg", out, 0, 10);
+
+    // Edge cases: zero or negative max_len
+    out[0] = 'x';
+    viewer_truncate_filename("photo.jpg", out, sizeof(out), 0);
+    TEST_ASSERT_STR_EQ(out, "");
+
+    out[0] = 'x';
+    viewer_truncate_filename("photo.jpg", out, sizeof(out), -5);
+    TEST_ASSERT_STR_EQ(out, "");
+
+    // Edge cases: dot at start (".hidden", 5 -> ".h...", 7 -> ".hidden")
+    viewer_truncate_filename(".hidden", out, sizeof(out), 5);
+    TEST_ASSERT_STR_EQ(out, ".h...");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 5);
+
+    viewer_truncate_filename(".hidden", out, sizeof(out), 7);
+    TEST_ASSERT_STR_EQ(out, ".hidden");
+
+    // Edge cases: small max_len (<= 3)
+    viewer_truncate_filename("photo.jpg", out, sizeof(out), 3);
+    TEST_ASSERT_STR_EQ(out, "...");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 3);
+
+    viewer_truncate_filename("photo.jpg", out, sizeof(out), 2);
+    TEST_ASSERT_STR_EQ(out, "..");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 2);
+
+    viewer_truncate_filename("photo.jpg", out, sizeof(out), 1);
+    TEST_ASSERT_STR_EQ(out, ".");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 1);
+
+    viewer_truncate_filename(".hidden", out, sizeof(out), 3);
+    TEST_ASSERT_STR_EQ(out, "...");
+
+    // Trailing dot without extension
+    viewer_truncate_filename("longfile.", out, sizeof(out), 6);
+    TEST_ASSERT_STR_EQ(out, "lon...");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 6);
+
+    // Buffer size smaller than max_len clamping
+    char tiny[6];
+    viewer_truncate_filename("photo.jpg", tiny, sizeof(tiny), 20);
+    TEST_ASSERT_INT_EQ((int)strlen(tiny), 5);
+    TEST_ASSERT_STR_EQ(tiny, "ph...");
+
+    // Extension too long to leave stem room
+    viewer_truncate_filename("test.verylongextension", out, sizeof(out), 10);
+    TEST_ASSERT_STR_EQ(out, "test.ve...");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 10);
+}
+
 static void test_viewer_is_image_file(void) {
     TEST_ASSERT(viewer_is_image_file("photo.jpg"));
     TEST_ASSERT(viewer_is_image_file("PHOTO.JPG"));
@@ -560,6 +645,7 @@ static void test_viewer_culling_and_metadata_render(void) {
 void run_viewer_tests(void) {
     printf("--- Viewer Test Suite ---\n");
     TEST_RUN(test_viewer_is_image_file);
+    TEST_RUN(test_viewer_truncate_filename);
     TEST_RUN(test_viewer_file_list_and_scan);
     TEST_RUN(test_viewer_load_unload);
     TEST_RUN(test_viewer_replace_and_bounds);

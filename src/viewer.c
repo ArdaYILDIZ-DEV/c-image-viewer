@@ -104,6 +104,43 @@ static bool path_join(char *dst, size_t dst_size, const char *dir, const char *f
 }
 
 /**
+ * Truncate a filename to fit within max_len characters, preserving the file extension.
+ * If name is longer than max_len, stems are truncated with "..." before the extension.
+ * If there is no extension or it is too long, suffix truncation is applied.
+ */
+void viewer_truncate_filename(const char *name, char *out, size_t out_sz, int max_len) {
+    if (!out || out_sz == 0) return;
+    if (!name || max_len <= 0) {
+        out[0] = '\0';
+        return;
+    }
+    if (max_len >= (int)out_sz) {
+        max_len = (int)out_sz - 1;
+    }
+    int len = (int)strlen(name);
+    if (len <= max_len) {
+        snprintf(out, out_sz, "%s", name);
+        return;
+    }
+    if (max_len <= 3) {
+        snprintf(out, out_sz, "%.*s", max_len, "...");
+        return;
+    }
+    const char *dot = strrchr(name, '.');
+    if (dot && dot != name && *(dot + 1) != '\0') {
+        const char *ext = dot + 1;
+        int ext_len = (int)strlen(ext);
+        if (ext_len <= max_len - 4) {
+            int prefix_len = max_len - 3 - ext_len;
+            snprintf(out, out_sz, "%.*s...%s", prefix_len, name, ext);
+            return;
+        }
+    }
+    int prefix_len = max_len - 3;
+    snprintf(out, out_sz, "%.*s...", prefix_len, name);
+}
+
+/**
  * Test whether a file name has a supported image extension.
  *
  * Performs case-insensitive matching against the list of supported extensions
@@ -737,15 +774,21 @@ void viewer_render_info_bar(SDL_Renderer *ren) {
     if (g_count == 1) {
         const char *b = g_img[0].path ? strrchr(g_img[0].path, '/') : NULL;
         b = b ? b + 1 : (g_img[0].path ? g_img[0].path : "?");
-        len = snprintf(line, sizeof(line), "%s  %dx%d  %d%%  %s  %d/%d  [s]ync [Tab] pane [f]ull [n/p] next/prev [ESC] browser",
-            b, g_img[0].w, g_img[0].h, pct, g_sync ? "SYNC" : "FREE", g_file_index + 1, g_file_count);
+        char trunc_b[VIEWER_INFO_NAME_MAX + 1];
+        viewer_truncate_filename(b, trunc_b, sizeof(trunc_b), VIEWER_INFO_NAME_MAX);
+        len = snprintf(line, sizeof(line), "%s  %dx%d  %d%%  %s  %d/%d  [s]ync [Tab] pane [f]ull [n/p] next/prev [e] exif [ESC] browser",
+            trunc_b, g_img[0].w, g_img[0].h, pct, g_sync ? "SYNC" : "FREE", g_file_index + 1, g_file_count);
     } else if (g_count == 2) {
         const char *b0 = g_img[0].path ? strrchr(g_img[0].path, '/') : NULL;
         const char *b1 = g_img[1].path ? strrchr(g_img[1].path, '/') : NULL;
         b0 = b0 ? b0 + 1 : (g_img[0].path ? g_img[0].path : "?");
         b1 = b1 ? b1 + 1 : (g_img[1].path ? g_img[1].path : "?");
-        len = snprintf(line, sizeof(line), "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s",
-            b0, g_img[0].w, g_img[0].h, b1, g_img[1].w, g_img[1].h, pct,
+        char trunc_b0[VIEWER_INFO_DUAL_NAME_MAX + 1];
+        char trunc_b1[VIEWER_INFO_DUAL_NAME_MAX + 1];
+        viewer_truncate_filename(b0, trunc_b0, sizeof(trunc_b0), VIEWER_INFO_DUAL_NAME_MAX);
+        viewer_truncate_filename(b1, trunc_b1, sizeof(trunc_b1), VIEWER_INFO_DUAL_NAME_MAX);
+        len = snprintf(line, sizeof(line), "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s  [e] exif",
+            trunc_b0, g_img[0].w, g_img[0].h, trunc_b1, g_img[1].w, g_img[1].h, pct,
             g_sync ? "SYNC" : "FREE", g_sync ? "" : (g_active == 0 ? " [L*]" : " [R*]"));
     } else {
         return;

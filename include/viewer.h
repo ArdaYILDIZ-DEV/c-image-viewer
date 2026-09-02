@@ -21,6 +21,9 @@
 #define PATH_MAX 4096
 #endif
 
+#define VIEWER_INFO_NAME_MAX 24
+#define VIEWER_INFO_DUAL_NAME_MAX 18
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -80,6 +83,13 @@ extern char g_current_dir[PATH_MAX];
  * @return true if extension is recognized as a supported image, false otherwise.
  */
 bool viewer_is_image_file(const char *name);
+
+/**
+ * Truncate a filename to fit within max_len characters, preserving the file extension.
+ * If name is longer than max_len, stems are truncated with "..." before the extension.
+ * If there is no extension or it is too long, suffix truncation is applied.
+ */
+void viewer_truncate_filename(const char *name, char *out, size_t out_sz, int max_len);
 
 /**
  * Validate that a path is a safe, readable regular file with an image extension.
