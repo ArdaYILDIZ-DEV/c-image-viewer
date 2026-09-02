@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsdl2-dev
+
+      - name: Build release assets
+        run: |
+          make clean
+          make
+          strip build/viewer
+
+          mkdir -p dist
+          VERSION="${GITHUB_REF_NAME#v}"
+          PACKAGE_DIR="c-image-viewer-${VERSION}-linux-x86_64"
+          mkdir -p "dist/${PACKAGE_DIR}"
+
+          cp build/viewer "dist/${PACKAGE_DIR}/c-image-viewer"
+          cp assets/c-image-viewer.desktop "dist/${PACKAGE_DIR}/"
+          cp README.md "dist/${PACKAGE_DIR}/"
+          cp LICENSE "dist/${PACKAGE_DIR}/"
+
+          tar -czf "dist/${PACKAGE_DIR}.tar.gz" -C dist "${PACKAGE_DIR}"
+          rm -rf "dist/${PACKAGE_DIR}"
+
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+          cd ..
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag
