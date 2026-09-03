@@ -63,12 +63,15 @@ clean:
 
 install: $(TARGET) assets/c-image-viewer.desktop
 	install -Dm755 $(TARGET) $(DESTDIR)$(BINDIR)/c-image-viewer
-	install -Dm644 assets/c-image-viewer.desktop $(DESTDIR)$(DESKTOPDIR)/c-image-viewer.desktop
+	install -d $(DESTDIR)$(DESKTOPDIR)
+	sed 's|^Exec=c-image-viewer|Exec=$(BINDIR)/c-image-viewer|' assets/c-image-viewer.desktop > $(DESTDIR)$(DESKTOPDIR)/c-image-viewer.desktop
+	chmod 644 $(DESTDIR)$(DESKTOPDIR)/c-image-viewer.desktop
 	install -d $(DESTDIR)$(ICONDIR)
 	./$(TARGET) --dump-icon $(DESTDIR)$(ICONDIR)/c-image-viewer.png
 	chmod 644 $(DESTDIR)$(ICONDIR)/c-image-viewer.png
+	@which update-desktop-database >/dev/null 2>&1 && update-desktop-database $(DESTDIR)$(DESKTOPDIR) || true
+	@which gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -f -t $(DESTDIR)$(DATADIR)/icons/hicolor || true
 	@echo "Installed to $(DESTDIR)$(PREFIX)"
-	@echo "Run 'update-desktop-database $(DESTDIR)$(DATADIR)/applications' if needed"
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/c-image-viewer
