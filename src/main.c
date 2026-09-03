@@ -239,7 +239,7 @@ static void handle_keydown(SDL_Keycode key, SDL_Keymod mod, bool *running) {
 /**
  * Load embedded application icon and assign it to the window.
  *
- * Decodes the in-memory 64x64 RGBA PNG icon using stb_image, constructs an
+ * Decodes the in-memory 48x48 RGBA PNG icon using stb_image, constructs an
  * SDL surface wrapping the decoded pixel buffer, assigns it to the window via
  * SDL_SetWindowIcon, and frees both the surface and stb_image pixel buffer.
  *
@@ -301,6 +301,10 @@ int main(int argc, char *argv[]) {
     }
 
     g_count = argc - 1;
+
+    SDL_SetHint(SDL_HINT_APP_NAME, "c-image-viewer");
+    SDL_SetHint("SDL_VIDEO_X11_WMCLASS", "c-image-viewer");
+    SDL_SetHint("SDL_VIDEO_WAYLAND_WMCLASS", "c-image-viewer");
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());

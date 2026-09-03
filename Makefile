@@ -31,7 +31,7 @@ PREFIX     ?= /usr/local
 BINDIR     ?= $(PREFIX)/bin
 DATADIR    ?= $(PREFIX)/share
 DESKTOPDIR ?= $(DATADIR)/applications
-ICONDIR    ?= $(DATADIR)/icons/hicolor/64x64/apps
+ICONDIR    ?= $(DATADIR)/icons/hicolor/48x48/apps
 
 all: $(TARGET)
 
