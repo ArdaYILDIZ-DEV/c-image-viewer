@@ -32,6 +32,10 @@
 #define VIEWER_INFO_NAME_MIN_DUAL 8
 #define VIEWER_INFO_NAME_TARGET_DUAL 18
 
+#define VIEWER_METADATA_STANDARD_PW 380
+#define VIEWER_METADATA_MIN_PW 160
+#define VIEWER_METADATA_MIN_PH 80
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -55,6 +59,19 @@ typedef struct {
     ViewerHintTier hint_tier;
     int name_budget[2];
 } ViewerStatusBarLayout;
+
+/**
+ * Calculated layout and bounding geometry for metadata overlay panel.
+ */
+typedef struct {
+    bool visible;          // True if panel fits and can be rendered
+    int px, py, pw, ph;    // Panel bounding rectangle in window coordinates
+    int label_x;           // Label column start X
+    int label_w;           // Label column maximum width
+    int value_x;           // Value column start X
+    int value_w;           // Value column maximum width
+    int footer_y;          // Footer top Y (py + ph - 20)
+} ViewerMetadataLayout;
 
 /**
  * Single loaded image and its GPU texture.
@@ -117,6 +134,7 @@ bool viewer_is_image_file(const char *name);
  * Truncate a filename to fit within max_len characters, preserving the file extension.
  * If name is longer than max_len, stems are truncated with "..." before the extension.
  * If there is no extension or it is too long, suffix truncation is applied.
+ * Guarantees safe NUL termination for all max_len and out_sz values (including <= 0).
  */
 void viewer_truncate_filename(const char *name, char *out, size_t out_sz, int max_len);
 
@@ -125,7 +143,8 @@ void viewer_truncate_filename(const char *name, char *out, size_t out_sz, int ma
  *
  * Maps standard STB channel counts (1, 2, 3, 4) to descriptive names (e.g.
  * "24-bit RGB", "32-bit RGBA"), formats custom channel counts as "%d channels",
- * and maps <= 0 to "Unknown".
+ * and maps <= 0 to "Unknown". Safely handles extreme or negative channel counts
+ * and tiny output buffers.
  *
  * @param channels Number of color channels in source image.
  * @param out Destination character buffer.
@@ -139,7 +158,8 @@ void viewer_format_color_depth(int channels, char *out, size_t out_sz);
  * Preserves the basename and as much of the root/leading directory prefix as
  * fits, inserting ".../" in between. If the basename itself exceeds max_chars,
  * falls back to viewer_truncate_filename. If max_chars is very small (<= 5),
- * outputs dots.
+ * outputs dots. Handles trailing slashes, root directories, and paths up to
+ * arbitrary lengths without buffer overrun.
  *
  * @param path Input filesystem path.
  * @param out Destination character buffer.
@@ -153,6 +173,7 @@ void viewer_truncate_path(const char *path, char *out, size_t out_sz, int max_ch
  *
  * Formats sizes into B, KB, MB, or GB with exact byte count appended in
  * parentheses for values >= 1024. Formats negative values and 0 as "0 B".
+ * Safely handles extreme ranges (up to LLONG_MAX) and tiny buffers.
  *
  * @param size File size in bytes (from stat st_size).
  * @param out Destination character buffer.
@@ -278,6 +299,14 @@ void viewer_do_pan(int dx, int dy);
  * When switching to sync mode: adopts active pane's transform for shared view.
  */
 void viewer_toggle_sync(void);
+
+/**
+ * Toggle the active pane between pane 0 and pane 1 in dual-pane mode.
+ *
+ * In dual-pane mode (g_count == 2), switches g_active between 0 and 1.
+ * In single-pane mode, ensures g_active is 0.
+ */
+void viewer_toggle_active_pane(void);
 
 /**
  * Toggle between windowed and fullscreen desktop display modes.
@@ -486,5 +515,40 @@ void viewer_render_metadata(SDL_Renderer *ren);
  * Toggle visibility of the right-hand EXIF and file metadata overlay panel.
  */
 void viewer_toggle_metadata(void);
+
+/**
+ * Reset the cached metadata and EXIF data.
+ *
+ * Clears s_cached_md_path so subsequent calls to viewer_render_metadata
+ * will re-stat and re-parse EXIF from disk. Safe to call at any time.
+ */
+void viewer_reset_metadata_cache(void);
+
+/**
+ * Calculate dynamic metadata overlay panel layout based on window dimensions.
+ *
+ * Adapts panel width, column positions, and height to window size while ensuring
+ * that labels and values do not overlap or overflow right margin, and that footer
+ * never overlaps title or rows.
+ *
+ * @param win_w Window width in pixels.
+ * @param win_h Window height in pixels.
+ * @param exif_rows Number of EXIF rows to accommodate.
+ * @return Calculated ViewerMetadataLayout struct.
+ */
+ViewerMetadataLayout viewer_calc_metadata_layout(int win_w, int win_h, int exif_rows);
+
+/**
+ * Query the cached metadata stat status and formatted size/mtime strings.
+ *
+ * Copies the cached file size and mtime strings into the provided buffers if non-NULL.
+ *
+ * @param size_out Optional buffer to receive cached size string.
+ * @param size_sz Size of size_out buffer.
+ * @param mtime_out Optional buffer to receive cached mtime string.
+ * @param mtime_sz Size of mtime_out buffer.
+ * @return true if s_has_stat is true, false otherwise.
+ */
+bool viewer_get_cached_stat_info(char *size_out, size_t size_sz, char *mtime_out, size_t mtime_sz);
 
 #endif /* VIEWER_H */

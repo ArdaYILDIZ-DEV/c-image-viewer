@@ -7,6 +7,7 @@
 
 #include "test_common.h"
 #include "viewer.h"
+#include "exif.h"
 #include "stb_image_write.h"
 
 #include <SDL2/SDL.h>
@@ -96,6 +97,69 @@ static void test_viewer_truncate_filename(void) {
     viewer_truncate_filename("test.verylongextension", out, sizeof(out), 10);
     TEST_ASSERT_STR_EQ(out, "test.ve...");
     TEST_ASSERT_INT_EQ((int)strlen(out), 10);
+
+    // Edge cases: single and double dot filenames
+    viewer_truncate_filename(".", out, sizeof(out), 5);
+    TEST_ASSERT_STR_EQ(out, ".");
+    viewer_truncate_filename(".", out, sizeof(out), 1);
+    TEST_ASSERT_STR_EQ(out, ".");
+    viewer_truncate_filename(".", out, sizeof(out), 0);
+    TEST_ASSERT_STR_EQ(out, "");
+
+    viewer_truncate_filename("..", out, sizeof(out), 5);
+    TEST_ASSERT_STR_EQ(out, "..");
+    viewer_truncate_filename("..", out, sizeof(out), 2);
+    TEST_ASSERT_STR_EQ(out, "..");
+    viewer_truncate_filename("..", out, sizeof(out), 1);
+    TEST_ASSERT_STR_EQ(out, ".");
+
+    // Edge cases: negative and INT_MIN max_len
+    viewer_truncate_filename("photo.jpg", out, sizeof(out), -1);
+    TEST_ASSERT_STR_EQ(out, "");
+    viewer_truncate_filename("photo.jpg", out, sizeof(out), -100);
+    TEST_ASSERT_STR_EQ(out, "");
+    viewer_truncate_filename("photo.jpg", out, sizeof(out), INT_MIN);
+    TEST_ASSERT_STR_EQ(out, "");
+
+    // Edge cases: multiple dots in filename
+    viewer_truncate_filename("archive.tar.gz", out, sizeof(out), 14);
+    TEST_ASSERT_STR_EQ(out, "archive.tar.gz");
+    viewer_truncate_filename("archive.tar.gz", out, sizeof(out), 12);
+    TEST_ASSERT_STR_EQ(out, "archive...gz");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 12);
+    viewer_truncate_filename("archive.tar.gz", out, sizeof(out), 6);
+    TEST_ASSERT_STR_EQ(out, "a...gz");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 6);
+    viewer_truncate_filename("archive.tar.gz", out, sizeof(out), 5);
+    TEST_ASSERT_STR_EQ(out, "ar...");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 5);
+
+    // Edge cases: leading dot files (dotfiles)
+    viewer_truncate_filename(".bashrc", out, sizeof(out), 7);
+    TEST_ASSERT_STR_EQ(out, ".bashrc");
+    viewer_truncate_filename(".bashrc", out, sizeof(out), 5);
+    TEST_ASSERT_STR_EQ(out, ".b...");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 5);
+    viewer_truncate_filename(".bashrc.bak", out, sizeof(out), 10);
+    TEST_ASSERT_STR_EQ(out, ".bas...bak");
+    TEST_ASSERT_INT_EQ((int)strlen(out), 10);
+
+    // 2000-character long filename
+    char long_name[2048];
+    memset(long_name, 'a', 2000);
+    memcpy(long_name + 1996, ".png", 5);
+    viewer_truncate_filename(long_name, out, sizeof(out), 20);
+    TEST_ASSERT_INT_EQ((int)strlen(out), 20);
+    TEST_ASSERT(strstr(out, "...png") != NULL);
+
+    // Tiny out_sz (1, 2, 3, 4, 5) bounds safety
+    for (int sz = 1; sz <= 5; sz++) {
+        char tbuf[8];
+        memset(tbuf, 'Z', sizeof(tbuf));
+        viewer_truncate_filename("photo.jpg", tbuf, (size_t)sz, 50);
+        TEST_ASSERT((int)strlen(tbuf) < sz);
+        TEST_ASSERT(tbuf[sz - 1] == '\0');
+    }
 }
 
 static void test_viewer_format_color_depth(void) {
@@ -122,11 +186,29 @@ static void test_viewer_format_color_depth(void) {
     viewer_format_color_depth(5, buf, sizeof(buf));
     TEST_ASSERT_STR_EQ(buf, "5 channels");
 
+    viewer_format_color_depth(100, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "100 channels");
+
+    viewer_format_color_depth(INT_MAX, buf, sizeof(buf));
+    TEST_ASSERT(strstr(buf, "channels") != NULL);
+
+    viewer_format_color_depth(INT_MIN, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "Unknown");
+
     // Small out_sz buffer truncation safety
     char small[6];
     viewer_format_color_depth(3, small, sizeof(small));
     TEST_ASSERT_STR_EQ(small, "24-bi");
     TEST_ASSERT_INT_EQ((int)strlen(small), 5);
+
+    // Tiny out_sz (1, 2, 3, 4, 5)
+    for (int sz = 1; sz <= 5; sz++) {
+        char tbuf[8];
+        memset(tbuf, 'Z', sizeof(tbuf));
+        viewer_format_color_depth(3, tbuf, (size_t)sz);
+        TEST_ASSERT((int)strlen(tbuf) < sz);
+        TEST_ASSERT(tbuf[sz - 1] == '\0');
+    }
 
     // NULL and 0 out_sz guards
     viewer_format_color_depth(3, NULL, 0);
@@ -204,6 +286,87 @@ static void test_viewer_truncate_path(void) {
     viewer_truncate_path(nested, tiny, sizeof(tiny), 20);
     TEST_ASSERT((int)strlen(tiny) <= 5);
 
+    // Edge cases: root, slashes, dot, dotdot
+    viewer_truncate_path("/", buf, sizeof(buf), 10);
+    TEST_ASSERT_STR_EQ(buf, "/");
+    viewer_truncate_path("/", buf, sizeof(buf), 1);
+    TEST_ASSERT_STR_EQ(buf, "/");
+    viewer_truncate_path("/", buf, sizeof(buf), 0);
+    TEST_ASSERT_STR_EQ(buf, "");
+
+    viewer_truncate_path("///", buf, sizeof(buf), 10);
+    TEST_ASSERT_STR_EQ(buf, "///");
+    viewer_truncate_path("///", buf, sizeof(buf), 2);
+    TEST_ASSERT_STR_EQ(buf, "..");
+    viewer_truncate_path("///", buf, sizeof(buf), 1);
+    TEST_ASSERT_STR_EQ(buf, ".");
+
+    viewer_truncate_path("", buf, sizeof(buf), 10);
+    TEST_ASSERT_STR_EQ(buf, "");
+
+    viewer_truncate_path(".", buf, sizeof(buf), 10);
+    TEST_ASSERT_STR_EQ(buf, ".");
+    viewer_truncate_path(".", buf, sizeof(buf), 1);
+    TEST_ASSERT_STR_EQ(buf, ".");
+
+    viewer_truncate_path("..", buf, sizeof(buf), 10);
+    TEST_ASSERT_STR_EQ(buf, "..");
+    viewer_truncate_path("..", buf, sizeof(buf), 1);
+    TEST_ASSERT_STR_EQ(buf, ".");
+
+    viewer_truncate_path("//foo", buf, sizeof(buf), 10);
+    TEST_ASSERT_STR_EQ(buf, "//foo");
+    viewer_truncate_path("//foo", buf, sizeof(buf), 4);
+    TEST_ASSERT_STR_EQ(buf, "....");
+
+    viewer_truncate_path("/foo/", buf, sizeof(buf), 10);
+    TEST_ASSERT_STR_EQ(buf, "/foo/");
+    viewer_truncate_path("/foo/", buf, sizeof(buf), 4);
+    TEST_ASSERT_STR_EQ(buf, "....");
+
+    viewer_truncate_path("/foo/bar/baz/qux/", buf, sizeof(buf), 10);
+    TEST_ASSERT_STR_EQ(buf, "/foo/ba...");
+
+    // max_chars smaller than strlen(basename)
+    viewer_truncate_path("/very/long/path/extremelylongfilename.png", buf, sizeof(buf), 12);
+    TEST_ASSERT_INT_EQ((int)strlen(buf), 12);
+    TEST_ASSERT(strstr(buf, "...png") != NULL);
+    viewer_truncate_path("/very/long/path/extremelylongfilename.png", buf, sizeof(buf), 5);
+    TEST_ASSERT_STR_EQ(buf, ".....");
+    viewer_truncate_path("/very/long/path/extremelylongfilename.png", buf, sizeof(buf), 3);
+    TEST_ASSERT_STR_EQ(buf, "...");
+
+    // Tiny out_sz (1, 2, 3, 4, 5) safe NUL-termination
+    for (int sz = 1; sz <= 5; sz++) {
+        char tbuf[8];
+        memset(tbuf, 'Z', sizeof(tbuf));
+        viewer_truncate_path(nested, tbuf, (size_t)sz, 50);
+        TEST_ASSERT((int)strlen(tbuf) < sz);
+        TEST_ASSERT(tbuf[sz - 1] == '\0');
+
+        viewer_truncate_path("/", tbuf, (size_t)sz, 50);
+        TEST_ASSERT((int)strlen(tbuf) < sz);
+        TEST_ASSERT(tbuf[sz - 1] == '\0');
+    }
+
+    // 2000-character long path with slashes
+    char long_p[2048];
+    memset(long_p, 'a', 2000);
+    long_p[0] = '/';
+    long_p[1985] = '/';
+    memcpy(long_p + 1986, "target.png", 11);
+    viewer_truncate_path(long_p, buf, sizeof(buf), 30);
+    TEST_ASSERT_INT_EQ((int)strlen(buf), 30);
+    TEST_ASSERT(strstr(buf, ".../target.png") != NULL);
+
+    // 2000-character long path without slashes
+    char long_p_noslash[2048];
+    memset(long_p_noslash, 'b', 2000);
+    memcpy(long_p_noslash + 1996, ".png", 5);
+    viewer_truncate_path(long_p_noslash, buf, sizeof(buf), 20);
+    TEST_ASSERT_INT_EQ((int)strlen(buf), 20);
+    TEST_ASSERT(strstr(buf, "...png") != NULL);
+
     // Invariant check: output length must NEVER exceed max_chars
     for (int mc = 1; mc <= 60; mc++) {
         char check_buf[128];
@@ -240,15 +403,31 @@ static void test_viewer_format_file_size(void) {
     viewer_format_file_size(-1024, buf, sizeof(buf));
     TEST_ASSERT_STR_EQ(buf, "0 B");
 
-    // Gigabytes range
+    viewer_format_file_size(LLONG_MIN, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "0 B");
+
+    // Gigabytes range and LLONG_MAX
     viewer_format_file_size(3221225472LL, buf, sizeof(buf));
     TEST_ASSERT_STR_EQ(buf, "3.00 GB (3221225472 B)");
+
+    viewer_format_file_size(LLONG_MAX, buf, sizeof(buf));
+    TEST_ASSERT(strstr(buf, "GB") != NULL);
+    TEST_ASSERT(strstr(buf, "9223372036854775807 B") != NULL);
 
     // Small buffer truncation safety
     char small[6];
     viewer_format_file_size(2048, small, sizeof(small));
     TEST_ASSERT_STR_EQ(small, "2.0 K");
     TEST_ASSERT_INT_EQ((int)strlen(small), 5);
+
+    // Tiny out_sz (1, 2, 3, 4, 5)
+    for (int sz = 1; sz <= 5; sz++) {
+        char tbuf[8];
+        memset(tbuf, 'Z', sizeof(tbuf));
+        viewer_format_file_size(2048, tbuf, (size_t)sz);
+        TEST_ASSERT((int)strlen(tbuf) < sz);
+        TEST_ASSERT(tbuf[sz - 1] == '\0');
+    }
 
     // NULL and 0 out_sz guards
     viewer_format_file_size(1024, NULL, 0);
@@ -892,6 +1071,25 @@ static void test_viewer_distribute_dual_budget(void) {
     TEST_ASSERT_INT_EQ(out0, 0);
     TEST_ASSERT_INT_EQ(out1, 0);
 
+    out0 = 99; out1 = 99;
+    viewer_distribute_dual_budget(INT_MIN, 10, 10, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 0);
+    TEST_ASSERT_INT_EQ(out1, 0);
+
+    // Negative lens and min_len
+    viewer_distribute_dual_budget(20, -5, 15, -2, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 0);
+    TEST_ASSERT_INT_EQ(out1, 20);
+
+    viewer_distribute_dual_budget(20, 15, -5, -2, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 20);
+    TEST_ASSERT_INT_EQ(out1, 0);
+
+    viewer_distribute_dual_budget(20, -10, -10, -2, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 10);
+    TEST_ASSERT_INT_EQ(out1, 10);
+    TEST_ASSERT_INT_EQ(out0 + out1, 20);
+
     // 6. NULL safety
     viewer_distribute_dual_budget(36, 10, 10, 8, NULL, &out1);
     viewer_distribute_dual_budget(36, 10, 10, 8, &out0, NULL);
@@ -946,6 +1144,32 @@ static void test_viewer_calc_status_layout_single(void) {
     TEST_ASSERT_INT_EQ(l0.usable_chars, 0);
     TEST_ASSERT_INT_EQ(l0.name_budget[0], 0);
 
+    // Window width edge cases: 1, 6, 11, 12, 13, negative, INT_MIN
+    int degen_w[] = {1, 6, 11, 12, 13, -1, -50, INT_MIN};
+    for (size_t i = 0; i < sizeof(degen_w)/sizeof(degen_w[0]); i++) {
+        ViewerStatusBarLayout l_deg = viewer_calc_status_layout_single(
+            degen_w[i], name, img_w, img_h, zoom, sync, idx, count);
+        TEST_ASSERT_INT_EQ(l_deg.hint_tier, VIEWER_HINT_NONE);
+        TEST_ASSERT_INT_EQ(l_deg.usable_chars, 0);
+        TEST_ASSERT_INT_EQ(l_deg.name_budget[0], 0);
+    }
+
+    // Negative and extreme dimensions / counters
+    ViewerStatusBarLayout l_neg = viewer_calc_status_layout_single(
+        800, name, -100, -200, -50, sync, -1, -5);
+    TEST_ASSERT(l_neg.usable_chars > 0);
+    char buf_neg[512];
+    viewer_format_status_single(&l_neg, name, -100, -200, -50, sync, -1, -5, buf_neg, sizeof(buf_neg));
+    TEST_ASSERT(strstr(buf_neg, "0x0") != NULL);
+    TEST_ASSERT(strstr(buf_neg, "0/0") != NULL);
+    TEST_ASSERT(strstr(buf_neg, "0%") != NULL);
+
+    ViewerStatusBarLayout l_huge = viewer_calc_status_layout_single(
+        800, name, INT_MAX, INT_MAX, 100, sync, 1, 10);
+    char buf_huge[512];
+    viewer_format_status_single(&l_huge, name, INT_MAX, INT_MAX, 100, sync, 1, 10, buf_huge, sizeof(buf_huge));
+    TEST_ASSERT(strstr(buf_huge, "2147483647x2147483647") != NULL);
+
     // Verify clamped total length <= usable_chars for all tested widths
     int widths[] = {1920, 1024, 800, 640, 400, 300, 0};
     for (size_t i = 0; i < sizeof(widths)/sizeof(widths[0]); i++) {
@@ -997,6 +1221,28 @@ static void test_viewer_calc_status_layout_dual(void) {
     TEST_ASSERT_INT_EQ(l0.usable_chars, 0);
     TEST_ASSERT_INT_EQ(l0.name_budget[0], 0);
     TEST_ASSERT_INT_EQ(l0.name_budget[1], 0);
+
+    // Window width edge cases: 1, 6, 11, 12, 13, negative, INT_MIN
+    int degen_dual_w[] = {1, 6, 11, 12, 13, -1, -50, INT_MIN};
+    for (size_t i = 0; i < sizeof(degen_dual_w)/sizeof(degen_dual_w[0]); i++) {
+        ViewerStatusBarLayout l_deg = viewer_calc_status_layout_dual(
+            degen_dual_w[i], name_short, w0, h0, name_long, w1, h1, zoom, sync, active);
+        TEST_ASSERT_INT_EQ(l_deg.hint_tier, VIEWER_HINT_NONE);
+        TEST_ASSERT_INT_EQ(l_deg.usable_chars, 0);
+        TEST_ASSERT_INT_EQ(l_deg.name_budget[0], 0);
+        TEST_ASSERT_INT_EQ(l_deg.name_budget[1], 0);
+    }
+
+    // Degenerate active_pane values (-1, 2, 100, INT_MIN)
+    int degen_panes[] = {-1, 2, 100, INT_MIN};
+    for (size_t i = 0; i < sizeof(degen_panes)/sizeof(degen_panes[0]); i++) {
+        ViewerStatusBarLayout l_p = viewer_calc_status_layout_dual(
+            800, name_short, w0, h0, name_long, w1, h1, zoom, false, degen_panes[i]);
+        TEST_ASSERT(l_p.usable_chars > 0);
+        char dbuf[512];
+        viewer_format_status_dual(&l_p, name_short, w0, h0, name_long, w1, h1, zoom, false, degen_panes[i], dbuf, sizeof(dbuf));
+        TEST_ASSERT(strstr(dbuf, "[L*]") != NULL);
+    }
 
     // Verify surplus sharing between short and long filenames:
     // When pane 0 is short ("a.jpg", 5 chars) and pane 1 is long (39 chars)
@@ -1087,6 +1333,870 @@ static void test_viewer_format_status(void) {
     TEST_ASSERT_INT_EQ(viewer_format_status_dual(NULL, "a.jpg", 800, 600, "b.jpg", 800, 600, 100, true, 0, buf, sizeof(buf)), 0);
 }
 
+static void test_viewer_render_metadata_and_info_edge_cases(void) {
+    int orig_w = g_win_w;
+    int orig_h = g_win_h;
+    int orig_count = g_count;
+    bool orig_show_info = g_show_info;
+    bool orig_show_meta = g_show_metadata;
+    bool orig_sync = g_sync;
+    int orig_active = g_active;
+    int orig_file_index = g_file_index;
+    int orig_file_count = g_file_count;
+    char *orig_p0 = g_img[0].path;
+    char *orig_p1 = g_img[1].path;
+
+    g_show_info = true;
+    g_show_metadata = true;
+
+    // 1. Degenerate window sizes with render_info_bar and render_metadata
+    int test_sizes[][2] = {
+        {0, 0}, {1, 1}, {6, 6}, {11, 11}, {12, 12}, {13, 13},
+        {40, 40}, {50, 50}, {-1, -1}, {-100, 500}, {500, -100}
+    };
+
+    for (size_t i = 0; i < sizeof(test_sizes)/sizeof(test_sizes[0]); i++) {
+        g_win_w = test_sizes[i][0];
+        g_win_h = test_sizes[i][1];
+
+        viewer_render_info_bar(g_ren);
+        viewer_render_metadata(g_ren);
+    }
+
+    // 2. Degenerate g_active pane indices
+    g_win_w = 800;
+    g_win_h = 600;
+    int bad_actives[] = {-1, 2, 5, 100, INT_MIN};
+
+    for (size_t i = 0; i < sizeof(bad_actives)/sizeof(bad_actives[0]); i++) {
+        g_active = bad_actives[i];
+        g_sync = false;
+
+        viewer_update_title();
+        viewer_render_info_bar(g_ren);
+        viewer_render_metadata(g_ren);
+        viewer_toggle_sync();
+        viewer_toggle_sync();
+    }
+
+    // 3. NULL image path with g_count = 1 and g_count = 2
+    g_active = 0;
+    g_sync = true;
+    g_img[0].path = NULL;
+    g_img[1].path = NULL;
+
+    g_count = 1;
+    viewer_update_title();
+    viewer_render_info_bar(g_ren);
+    viewer_render_metadata(g_ren);
+
+    g_count = 2;
+    viewer_update_title();
+    viewer_render_info_bar(g_ren);
+    viewer_render_metadata(g_ren);
+
+    // 4. Degenerate g_count values (0, -1, 3)
+    g_count = 0;
+    viewer_update_title();
+    viewer_render_info_bar(g_ren);
+    viewer_render_metadata(g_ren);
+
+    g_count = -1;
+    viewer_update_title();
+    viewer_render_info_bar(g_ren);
+    viewer_render_metadata(g_ren);
+
+    g_count = 3;
+    viewer_update_title();
+    viewer_render_info_bar(g_ren);
+    viewer_render_metadata(g_ren);
+
+    // 5. Negative file index and count in title formatting
+    g_count = 1;
+    g_file_index = -5;
+    g_file_count = -10;
+    viewer_update_title();
+
+    // Restore original state
+    g_win_w = orig_w;
+    g_win_h = orig_h;
+    g_count = orig_count;
+    g_show_info = orig_show_info;
+    g_show_metadata = orig_show_meta;
+    g_sync = orig_sync;
+    g_active = orig_active;
+    g_file_index = orig_file_index;
+    g_file_count = orig_file_count;
+    g_img[0].path = orig_p0;
+    g_img[1].path = orig_p1;
+}
+
+static void test_viewer_metadata_cache_stress(void) {
+    const char *img1 = "/tmp/civ_cache_stress1.png";
+    const char *img2 = "/tmp/civ_cache_stress2.png";
+    unsigned char px1[4] = {255, 0, 0, 255};
+    unsigned char px2[4] = {0, 255, 0, 255};
+    TEST_ASSERT(stbi_write_png(img1, 1, 1, 4, px1, 4));
+    TEST_ASSERT(stbi_write_png(img2, 1, 1, 4, px2, 4));
+
+    bool orig_meta = g_show_metadata;
+    int orig_count = g_count;
+    int orig_w = g_win_w;
+    int orig_h = g_win_h;
+
+    g_win_w = 800;
+    g_win_h = 600;
+    g_show_metadata = true;
+    g_count = 1;
+
+    TEST_ASSERT(viewer_load_image(img1, &g_img[0]));
+
+    // 2000 metadata cache lookups, resets, and alternations
+    for (int i = 0; i < 2000; i++) {
+        if (i % 20 == 0) {
+            viewer_reset_metadata_cache();
+        }
+        if (i % 50 == 0) {
+            const char *next = (i % 100 == 0) ? img1 : img2;
+            TEST_ASSERT(viewer_load_image(next, &g_img[0]));
+        }
+        viewer_render_metadata(g_ren);
+    }
+
+    viewer_unload_image(&g_img[0]);
+    g_count = orig_count;
+    g_show_metadata = orig_meta;
+    g_win_w = orig_w;
+    g_win_h = orig_h;
+
+    unlink(img1);
+    unlink(img2);
+}
+
+static void test_viewer_repeated_load_unload_cycles(void) {
+    const char *img_a = "/tmp/civ_cycle_a.png";
+    const char *img_b = "/tmp/civ_cycle_b.png";
+    unsigned char px_a[8 * 8 * 4];
+    unsigned char px_b[16 * 16 * 4];
+    memset(px_a, 100, sizeof(px_a));
+    memset(px_b, 200, sizeof(px_b));
+    TEST_ASSERT(stbi_write_png(img_a, 8, 8, 4, px_a, 8 * 4));
+    TEST_ASSERT(stbi_write_png(img_b, 16, 16, 4, px_b, 16 * 4));
+
+    // 1. Repeated direct overwrites with viewer_load_image without prior unload
+    Image img = {0};
+    for (int i = 0; i < 300; i++) {
+        const char *src = (i % 2 == 0) ? img_a : img_b;
+        int expected_dim = (i % 2 == 0) ? 8 : 16;
+        TEST_ASSERT(viewer_load_image(src, &img));
+        TEST_ASSERT(img.tex != NULL);
+        TEST_ASSERT(img.path != NULL);
+        TEST_ASSERT_INT_EQ(img.w, expected_dim);
+        TEST_ASSERT_INT_EQ(img.h, expected_dim);
+    }
+    viewer_unload_image(&img);
+    TEST_ASSERT(img.tex == NULL && img.path == NULL);
+
+    // 2. Repeated load / unload cycles
+    for (int i = 0; i < 200; i++) {
+        TEST_ASSERT(viewer_load_image(img_a, &img));
+        TEST_ASSERT(img.tex != NULL);
+        viewer_unload_image(&img);
+        TEST_ASSERT(img.tex == NULL && img.path == NULL);
+    }
+
+    // 3. Repeated viewer_replace_image cycles
+    for (int i = 0; i < 300; i++) {
+        const char *src = (i % 2 == 0) ? img_a : img_b;
+        TEST_ASSERT(viewer_replace_image(0, src));
+        TEST_ASSERT(g_img[0].tex != NULL);
+    }
+    viewer_unload_image(&g_img[0]);
+    g_count = 0;
+
+    unlink(img_a);
+    unlink(img_b);
+}
+
+static void test_viewer_corrupt_load_cleanup_stress(void) {
+    const char *valid = "/tmp/civ_cstress_valid.png";
+    const char *empty = "/tmp/civ_cstress_empty.png";
+    const char *trunc = "/tmp/civ_cstress_trunc.png";
+    const char *garbage = "/tmp/civ_cstress_garbage.png";
+
+    unsigned char px[4] = {120, 200, 80, 255};
+    TEST_ASSERT(stbi_write_png(valid, 1, 1, 4, px, 4));
+    write_raw_file(empty, "", 0);
+    uint8_t png_hdr[] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
+    write_raw_file(trunc, png_hdr, sizeof(png_hdr));
+    uint8_t rand_bytes[2048];
+    for (size_t i = 0; i < sizeof(rand_bytes); i++) rand_bytes[i] = (uint8_t)(i * 47 + 13);
+    write_raw_file(garbage, rand_bytes, sizeof(rand_bytes));
+
+    const char *corrupt_list[] = {
+        empty,
+        trunc,
+        garbage,
+        "/tmp/civ_cstress_nonexistent.png",
+        "/dev/null",
+        "/tmp"
+    };
+    int corrupt_count = (int)(sizeof(corrupt_list) / sizeof(corrupt_list[0]));
+
+    // 1. Verify that loading corrupt file into already-loaded Image cleanly unloads and zeroes it without leak
+    for (int c = 0; c < corrupt_count; c++) {
+        Image img = {0};
+        TEST_ASSERT(viewer_load_image(valid, &img));
+        TEST_ASSERT(img.tex != NULL && img.path != NULL);
+
+        // Attempting to load corrupt image into already-loaded img struct
+        TEST_ASSERT(!viewer_load_image(corrupt_list[c], &img));
+        TEST_ASSERT(img.tex == NULL);
+        TEST_ASSERT(img.path == NULL);
+        TEST_ASSERT_INT_EQ(img.w, 0);
+        TEST_ASSERT_INT_EQ(img.h, 0);
+    }
+
+    // 2. Verify repeated stress cycles of valid load followed by corrupt load
+    for (int i = 0; i < 200; i++) {
+        Image img = {0};
+        TEST_ASSERT(viewer_load_image(valid, &img));
+        const char *bad = corrupt_list[i % corrupt_count];
+        TEST_ASSERT(!viewer_load_image(bad, &img));
+        TEST_ASSERT(img.tex == NULL && img.path == NULL);
+    }
+
+    // 3. Verify viewer_replace_image preserves existing image on corrupt replacement attempts
+    TEST_ASSERT(viewer_replace_image(0, valid));
+    for (int i = 0; i < 200; i++) {
+        const char *bad = corrupt_list[i % corrupt_count];
+        TEST_ASSERT(!viewer_replace_image(0, bad));
+        TEST_ASSERT(g_img[0].tex != NULL);
+        TEST_ASSERT_STR_EQ(g_img[0].path, valid);
+    }
+    viewer_unload_image(&g_img[0]);
+    g_count = 0;
+
+    unlink(valid);
+    unlink(empty);
+    unlink(trunc);
+    unlink(garbage);
+}
+
+static bool test_helpers_check_atomic_bracket_tokens(const char *str) {
+    const char *p = str;
+    while ((p = strchr(p, '[')) != NULL) {
+        const char *close = strchr(p, ']');
+        if (!close) return false;
+        if (strncmp(p, "[e", 2) == 0 && strncmp(p, "[e]", 3) != 0) return false;
+        if (strncmp(p, "[s", 2) == 0 && strncmp(p, "[s]ync", 6) != 0) return false;
+        if (strncmp(p, "[f", 2) == 0 && strncmp(p, "[f]ull", 6) != 0) return false;
+        if (strncmp(p, "[n", 2) == 0 && strncmp(p, "[n/p]", 5) != 0) return false;
+        if (strncmp(p, "[T", 2) == 0 && strncmp(p, "[Tab]", 5) != 0) return false;
+        if (strncmp(p, "[E", 2) == 0 && strncmp(p, "[ESC]", 5) != 0) return false;
+        p = close + 1;
+    }
+    return true;
+}
+
+static void test_viewer_ui_layout_invariants(void) {
+    // 1. Single pane status bar layout invariants across widths from 100px to 4000px
+    const char *filenames[] = {
+        "",
+        "a.jpg",
+        "normal_photo.png",
+        "panoramic_mountain_view_scenic_high_resolution_landscape_autumn_2026.jpeg",
+        "an_exceptionally_enormous_filename_stress_testing_character_budget_allocation_and_boundary_checks_2026_test_pattern_version_final.png",
+        "no_extension_image",
+        "x"
+    };
+
+    for (size_t f = 0; f < sizeof(filenames)/sizeof(filenames[0]); f++) {
+        const char *name = filenames[f];
+        int prev_tier = (int)VIEWER_HINT_NONE;
+
+        // Sweep from 100px to 4000px in 50px increments
+        for (int w = 100; w <= 4000; w += 50) {
+            ViewerStatusBarLayout layout = viewer_calc_status_layout_single(
+                w, name, 1920, 1080, 100, true, 3, 12);
+
+            // Invariants
+            TEST_ASSERT(layout.usable_chars >= 0);
+            TEST_ASSERT_INT_EQ(layout.usable_chars, (w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W);
+            TEST_ASSERT(layout.name_budget[0] >= 0);
+            TEST_ASSERT_INT_EQ(layout.name_budget[1], 0);
+            TEST_ASSERT(layout.hint_tier >= VIEWER_HINT_NONE && layout.hint_tier < VIEWER_HINT_TIER_COUNT);
+
+            // Monotonic tier transitions: tier never decreases as width increases
+            TEST_ASSERT((int)layout.hint_tier >= prev_tier);
+            prev_tier = (int)layout.hint_tier;
+
+            char buf[512];
+            int len = viewer_format_status_single(
+                &layout, name, 1920, 1080, 100, true, 3, 12, buf, sizeof(buf));
+            TEST_ASSERT(len >= 0);
+            TEST_ASSERT_INT_EQ(len, (int)strlen(buf));
+
+            // Clamped length invariant
+            int clamped_len = (len > layout.usable_chars) ? layout.usable_chars : len;
+            TEST_ASSERT(clamped_len <= layout.usable_chars);
+
+            // When hint is displayed, line MUST fit entirely within usable_chars
+            if (layout.hint_tier > VIEWER_HINT_NONE) {
+                TEST_ASSERT(len <= layout.usable_chars);
+            }
+
+            // Verify shortcut atomicity
+            TEST_ASSERT(test_helpers_check_atomic_bracket_tokens(buf));
+        }
+    }
+
+    // 2. Dual pane status bar layout invariants across widths from 100px to 4000px
+    const char *dual_pairs[][2] = {
+        {"a.jpg", "b.jpg"},
+        {"a.jpg", "extremely_long_photo_mountain_panorama_2026.png"},
+        {"extremely_long_photo_mountain_panorama_2026.png", "b.jpg"},
+        {"panoramic_view_1.jpeg", "panoramic_view_2.jpeg"},
+        {"", "panoramic_view_2.jpeg"},
+        {"panoramic_view_1.jpeg", ""}
+    };
+
+    for (size_t p = 0; p < sizeof(dual_pairs)/sizeof(dual_pairs[0]); p++) {
+        const char *n0 = dual_pairs[p][0];
+        const char *n1 = dual_pairs[p][1];
+        int prev_tier = (int)VIEWER_HINT_NONE;
+
+        for (int w = 100; w <= 4000; w += 50) {
+            for (int sync_idx = 0; sync_idx < 2; sync_idx++) {
+                bool sync = (sync_idx == 1);
+                for (int active = 0; active < 2; active++) {
+                    ViewerStatusBarLayout layout = viewer_calc_status_layout_dual(
+                        w, n0, 1920, 1080, n1, 1280, 720, 100, sync, active);
+
+                    // Invariants
+                    TEST_ASSERT(layout.usable_chars >= 0);
+                    TEST_ASSERT_INT_EQ(layout.usable_chars, (w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W);
+                    TEST_ASSERT(layout.name_budget[0] >= 0);
+                    TEST_ASSERT(layout.name_budget[1] >= 0);
+                    TEST_ASSERT(layout.hint_tier >= VIEWER_HINT_NONE && layout.hint_tier < VIEWER_HINT_TIER_COUNT);
+
+                    char buf[512];
+                    int len = viewer_format_status_dual(
+                        &layout, n0, 1920, 1080, n1, 1280, 720, 100, sync, active, buf, sizeof(buf));
+                    TEST_ASSERT(len >= 0);
+                    TEST_ASSERT_INT_EQ(len, (int)strlen(buf));
+
+                    int clamped_len = (len > layout.usable_chars) ? layout.usable_chars : len;
+                    TEST_ASSERT(clamped_len <= layout.usable_chars);
+
+                    if (layout.hint_tier > VIEWER_HINT_NONE) {
+                        TEST_ASSERT(len <= layout.usable_chars);
+                    }
+
+                    TEST_ASSERT(test_helpers_check_atomic_bracket_tokens(buf));
+
+                    if (!sync) {
+                        if (active == 0) TEST_ASSERT(strstr(buf, "[L*]") != NULL);
+                        else TEST_ASSERT(strstr(buf, "[R*]") != NULL);
+                    }
+                }
+            }
+
+            // Monotonicity check under fixed conditions
+            ViewerStatusBarLayout l_mono = viewer_calc_status_layout_dual(
+                w, n0, 1920, 1080, n1, 1280, 720, 100, true, 0);
+            TEST_ASSERT((int)l_mono.hint_tier >= prev_tier);
+            prev_tier = (int)l_mono.hint_tier;
+        }
+    }
+
+    // 3. Dual budget distribution symmetry and surplus donation
+    int b0 = -1, b1 = -1;
+    viewer_distribute_dual_budget(60, 50, 50, 8, &b0, &b1);
+    TEST_ASSERT_INT_EQ(b0, 30);
+    TEST_ASSERT_INT_EQ(b1, 30);
+    TEST_ASSERT_INT_EQ(b0 + b1, 60);
+
+    viewer_distribute_dual_budget(60, 10, 50, 8, &b0, &b1);
+    TEST_ASSERT_INT_EQ(b0, 10);
+    TEST_ASSERT_INT_EQ(b1, 50);
+    TEST_ASSERT_INT_EQ(b0 + b1, 60);
+
+    viewer_distribute_dual_budget(60, 50, 10, 8, &b0, &b1);
+    TEST_ASSERT_INT_EQ(b0, 50);
+    TEST_ASSERT_INT_EQ(b1, 10);
+    TEST_ASSERT_INT_EQ(b0 + b1, 60);
+
+    // 4. Metadata panel bounding box geometry invariants across degenerate and normal dimensions
+    int degen_w[] = {-100, -1, 0, 1, 10, 50, 100, 150, 180, 199};
+    int degen_h[] = {-100, -1, 0, 1, 10, 50, 70, 79, 100, 119};
+    for (size_t i = 0; i < sizeof(degen_w)/sizeof(degen_w[0]); i++) {
+        for (size_t j = 0; j < sizeof(degen_h)/sizeof(degen_h[0]); j++) {
+            ViewerMetadataLayout l_deg = viewer_calc_metadata_layout(degen_w[i], degen_h[j], 1);
+            TEST_ASSERT(!l_deg.visible);
+        }
+    }
+
+    int test_widths[] = {200, 240, 300, 360, 380, 400, 640, 800, 1024, 1280, 1920, 2560, 3840};
+    int test_heights[] = {120, 160, 200, 240, 360, 480, 600, 720, 1080, 1440, 2160};
+    int exif_counts[] = {0, 1, 4, 8, 12};
+
+    for (size_t i = 0; i < sizeof(test_widths)/sizeof(test_widths[0]); i++) {
+        int w = test_widths[i];
+        for (size_t j = 0; j < sizeof(test_heights)/sizeof(test_heights[0]); j++) {
+            int h = test_heights[j];
+            for (size_t k = 0; k < sizeof(exif_counts)/sizeof(exif_counts[0]); k++) {
+                int ec = exif_counts[k];
+                ViewerMetadataLayout ml = viewer_calc_metadata_layout(w, h, ec);
+                if (ml.visible) {
+                    TEST_ASSERT(ml.pw >= VIEWER_METADATA_MIN_PW);
+                    TEST_ASSERT(ml.ph >= VIEWER_METADATA_MIN_PH);
+                    TEST_ASSERT(ml.px >= 0);
+                    TEST_ASSERT(ml.px + ml.pw <= w);
+                    TEST_ASSERT(ml.py >= 0);
+                    TEST_ASSERT(ml.py + ml.ph <= h);
+                    TEST_ASSERT(ml.label_x >= ml.px + 8);
+                    TEST_ASSERT(ml.label_w >= 48);
+                    TEST_ASSERT(ml.label_x + ml.label_w <= ml.value_x);
+                    TEST_ASSERT(ml.value_w > 0);
+                    TEST_ASSERT(ml.value_x + ml.value_w <= ml.px + ml.pw - 8);
+                    TEST_ASSERT_INT_EQ(ml.footer_y, ml.py + ml.ph - 20);
+                    TEST_ASSERT(ml.footer_y >= ml.py + 26);
+                }
+            }
+        }
+    }
+
+    // 5. Active pane switching reflection test
+    const char *tmp_pane0 = "/tmp/civ_pane0_active_test.png";
+    const char *tmp_pane1 = "/tmp/civ_pane1_active_test.png";
+    unsigned char dummy_pixels[16 * 16 * 4];
+    memset(dummy_pixels, 100, sizeof(dummy_pixels));
+    TEST_ASSERT(stbi_write_png(tmp_pane0, 16, 16, 4, dummy_pixels, 16 * 4));
+    memset(dummy_pixels, 200, sizeof(dummy_pixels));
+    TEST_ASSERT(stbi_write_png(tmp_pane1, 16, 16, 4, dummy_pixels, 16 * 4));
+
+    TEST_ASSERT(viewer_replace_image(0, tmp_pane0));
+    TEST_ASSERT(viewer_replace_image(1, tmp_pane1));
+    g_count = 2;
+    g_win_w = 800;
+    g_win_h = 600;
+    g_show_info = true;
+    g_show_metadata = true;
+
+    // Free mode: switching pane changes status bar indicator and active index
+    g_sync = false;
+    g_active = 0;
+    viewer_update_title();
+    viewer_render_info_bar(g_ren);
+    viewer_render_metadata(g_ren);
+
+    ViewerStatusBarLayout l_act0 = viewer_calc_status_layout_dual(
+        g_win_w, g_img[0].path, 16, 16, g_img[1].path, 16, 16, 100, false, 0);
+    char buf_act0[512];
+    viewer_format_status_dual(&l_act0, g_img[0].path, 16, 16, g_img[1].path, 16, 16, 100, false, 0, buf_act0, sizeof(buf_act0));
+    TEST_ASSERT(strstr(buf_act0, "[L*]") != NULL);
+
+    g_active = 1;
+    viewer_update_title();
+    viewer_render_info_bar(g_ren);
+    viewer_render_metadata(g_ren);
+
+    ViewerStatusBarLayout l_act1 = viewer_calc_status_layout_dual(
+        g_win_w, g_img[0].path, 16, 16, g_img[1].path, 16, 16, 100, false, 1);
+    char buf_act1[512];
+    viewer_format_status_dual(&l_act1, g_img[0].path, 16, 16, g_img[1].path, 16, 16, 100, false, 1, buf_act1, sizeof(buf_act1));
+    TEST_ASSERT(strstr(buf_act1, "[R*]") != NULL);
+
+    // Sync mode: active pane switches metadata overlay target
+    g_sync = true;
+    g_active = 0;
+    viewer_render_metadata(g_ren);
+    g_active = 1;
+    viewer_render_metadata(g_ren);
+
+    viewer_unload_image(&g_img[0]);
+    viewer_unload_image(&g_img[1]);
+    g_count = 0;
+    unlink(tmp_pane0);
+    unlink(tmp_pane1);
+}
+
+static void test_viewer_performance_benchmarks(void) {
+    const char *path = "/home/user/pictures/vacation/scenic_mountain_sunset_2026.jpg";
+    const char *name0 = "photo_archive_original_hires_image_pane0.png";
+    const char *name1 = "photo_archive_processed_contrast_enhanced_pane1.png";
+    char out[512];
+
+    // 1. Benchmark status bar layout + format: 50,000 iterations single-pane and 50,000 dual-pane
+    Uint64 t0 = SDL_GetPerformanceCounter();
+    int dummy_len = 0;
+
+    for (int i = 0; i < 50000; i++) {
+        int w = 800 + (i % 800);
+        ViewerStatusBarLayout l_single = viewer_calc_status_layout_single(
+            w, path, 1920, 1080, 100, true, (i % 100) + 1, 100);
+        dummy_len += viewer_format_status_single(
+            &l_single, path, 1920, 1080, 100, true, (i % 100) + 1, 100, out, sizeof(out));
+    }
+
+    for (int i = 0; i < 50000; i++) {
+        int w = 800 + (i % 800);
+        ViewerStatusBarLayout l_dual = viewer_calc_status_layout_dual(
+            w, name0, 1920, 1080, name1, 1280, 720, 120, false, i % 2);
+        dummy_len += viewer_format_status_dual(
+            &l_dual, name0, 1920, 1080, name1, 1280, 720, 120, false, i % 2, out, sizeof(out));
+    }
+
+    Uint64 t1 = SDL_GetPerformanceCounter();
+    double freq = (double)SDL_GetPerformanceFrequency();
+    double ms_status = (double)(t1 - t0) * 1000.0 / freq;
+    printf("    [Benchmark] Status bar layout+format (50k single + 50k dual): %.2f ms\n", ms_status);
+    TEST_ASSERT(dummy_len > 0);
+
+    // 2. Benchmark path and filename truncation: 50,000 iterations each
+    Uint64 t2 = SDL_GetPerformanceCounter();
+    int dummy_trunc = 0;
+
+    for (int i = 0; i < 50000; i++) {
+        int max_len = 10 + (i % 40);
+        viewer_truncate_filename(name0, out, sizeof(out), max_len);
+        dummy_trunc += (unsigned char)out[0];
+    }
+
+    for (int i = 0; i < 50000; i++) {
+        int max_chars = 15 + (i % 50);
+        viewer_truncate_path(path, out, sizeof(out), max_chars);
+        dummy_trunc += (unsigned char)out[0];
+    }
+
+    Uint64 t3 = SDL_GetPerformanceCounter();
+    double ms_trunc = (double)(t3 - t2) * 1000.0 / freq;
+    printf("    [Benchmark] Truncation (50k filename + 50k path): %.2f ms\n", ms_trunc);
+    TEST_ASSERT(dummy_trunc != 0);
+}
+
+static void test_viewer_stress_lifecycle_and_mutation(void) {
+    int orig_w = g_win_w;
+    int orig_h = g_win_h;
+    int orig_count = g_count;
+    bool orig_show_info = g_show_info;
+    bool orig_show_meta = g_show_metadata;
+    bool orig_sync = g_sync;
+    int orig_active = g_active;
+    int orig_file_index = g_file_index;
+    int orig_file_count = g_file_count;
+    char *orig_p0 = g_img[0].path;
+    char *orig_p1 = g_img[1].path;
+    char orig_dir[PATH_MAX];
+    snprintf(orig_dir, sizeof(orig_dir), "%s", g_current_dir);
+
+    // =========================================================================
+    // 1. Active File Deletion / Unlinking Mid-Display
+    // =========================================================================
+    const char *del_img = "/tmp/civ_stress_active_del.png";
+    unsigned char del_px[16 * 16 * 4];
+    memset(del_px, 180, sizeof(del_px));
+    TEST_ASSERT(stbi_write_png(del_img, 16, 16, 4, del_px, 16 * 4));
+
+    g_win_w = 800;
+    g_win_h = 600;
+    g_count = 1;
+    g_active = 0;
+    g_sync = true;
+    g_show_info = true;
+    g_show_metadata = true;
+
+    TEST_ASSERT(viewer_load_image(del_img, &g_img[0]));
+    TEST_ASSERT(g_img[0].tex != NULL);
+    TEST_ASSERT(g_img[0].path != NULL);
+
+    // Initial render with metadata: stat and EXIF succeed
+    viewer_render_metadata(g_ren);
+    char sz_buf[64] = {0}, mt_buf[64] = {0};
+    bool has_stat = viewer_get_cached_stat_info(sz_buf, sizeof(sz_buf), mt_buf, sizeof(mt_buf));
+    TEST_ASSERT(has_stat);
+    TEST_ASSERT(strcmp(sz_buf, "?") != 0);
+    TEST_ASSERT(strcmp(mt_buf, "?") != 0);
+
+    // Full render while file is on disk
+    viewer_render(g_ren);
+
+    // Delete active file from disk while displayed & metadata overlay is open
+    TEST_ASSERT_INT_EQ(unlink(del_img), 0);
+    TEST_ASSERT(access(del_img, F_OK) != 0);
+
+    // File is unlinked, but in-memory GPU texture remains valid and render must not crash
+    viewer_render(g_ren);
+    viewer_render_info_bar(g_ren);
+    viewer_render_metadata(g_ren);
+
+    // Reset metadata cache to force re-stat and re-parse of the deleted file
+    viewer_reset_metadata_cache();
+    viewer_render_metadata(g_ren);
+
+    // Verify stat failure handling when file was deleted:
+    // s_has_stat becomes false, cached size and mtime strings fallback to "?"
+    has_stat = viewer_get_cached_stat_info(sz_buf, sizeof(sz_buf), mt_buf, sizeof(mt_buf));
+    TEST_ASSERT(!has_stat);
+    TEST_ASSERT_STR_EQ(sz_buf, "?");
+    TEST_ASSERT_STR_EQ(mt_buf, "?");
+
+    // Verify exif_read returns false and has_exif is false for missing/deleted file
+    ExifData del_exif;
+    bool exif_ret = exif_read(del_img, &del_exif);
+    TEST_ASSERT(!exif_ret);
+    TEST_ASSERT(!del_exif.has_exif);
+    TEST_ASSERT_INT_EQ(del_exif.orientation, 1);
+
+    // Render again with invalidated/failed stat: must not crash or leak
+    viewer_render(g_ren);
+    viewer_unload_image(&g_img[0]);
+    g_count = 0;
+
+    // =========================================================================
+    // 2. Window Resizing Storm Simulation (1000 Cycles Across Extremes)
+    // =========================================================================
+    const char *storm0 = "/tmp/civ_storm_0.png";
+    const char *storm1 = "/tmp/civ_storm_1.png";
+    unsigned char s_px[8 * 8 * 4];
+    memset(s_px, 120, sizeof(s_px));
+    TEST_ASSERT(stbi_write_png(storm0, 8, 8, 4, s_px, 8 * 4));
+    TEST_ASSERT(stbi_write_png(storm1, 8, 8, 4, s_px, 8 * 4));
+
+    TEST_ASSERT(viewer_load_image(storm0, &g_img[0]));
+    TEST_ASSERT(viewer_load_image(storm1, &g_img[1]));
+
+    static const int storm_dims[][2] = {
+        {3840, 2160},
+        {100, 50},
+        {10, 10},
+        {0, 0},
+        {-50, -50},
+        {800, 600},
+        {1920, 1080},
+        {1, 1},
+        {2, 500},
+        {12, 12},
+        {40, 40},
+        {160, 80},
+        {300, 200},
+        {7680, 4320},
+        {-1, 500},
+        {500, -1},
+        {-1000, -1000}
+    };
+    size_t num_dims = sizeof(storm_dims) / sizeof(storm_dims[0]);
+
+    for (int i = 0; i < 1000; i++) {
+        size_t d_idx = (size_t)i % num_dims;
+        g_win_w = storm_dims[d_idx][0];
+        g_win_h = storm_dims[d_idx][1];
+
+        g_count = (i % 3 == 0) ? 1 : 2;
+        g_sync = (i % 2 == 0);
+        g_active = (i % 4 == 0) ? 1 : 0;
+        g_show_info = (i % 5 != 0);
+        g_show_metadata = (i % 6 != 0);
+
+        viewer_render_info_bar(g_ren);
+        viewer_render_metadata(g_ren);
+        viewer_render(g_ren);
+        viewer_fit_view();
+
+        int mx = (g_win_w > 0) ? (g_win_w / 2) : 0;
+        int my = (g_win_h > 0) ? (g_win_h / 2) : 0;
+        float factor = (i % 2 == 0) ? 1.15f : 0.85f;
+        viewer_do_zoom(factor, mx, my);
+        viewer_do_pan((i % 20) - 10, 10 - (i % 20));
+        viewer_update_title();
+    }
+
+    viewer_unload_image(&g_img[0]);
+    viewer_unload_image(&g_img[1]);
+    g_count = 0;
+    unlink(storm0);
+    unlink(storm1);
+
+    // =========================================================================
+    // 3. Rapid Navigation, Dual-Pane & Concurrent State Transitions
+    // =========================================================================
+    const char *trans0 = "/tmp/civ_trans_0.png";
+    const char *trans1 = "/tmp/civ_trans_1.png";
+    TEST_ASSERT(stbi_write_png(trans0, 8, 8, 4, s_px, 8 * 4));
+    TEST_ASSERT(stbi_write_png(trans1, 8, 8, 4, s_px, 8 * 4));
+
+    TEST_ASSERT(viewer_load_image(trans0, &g_img[0]));
+    TEST_ASSERT(viewer_load_image(trans1, &g_img[1]));
+    g_count = 2;
+    g_win_w = 1024;
+    g_win_h = 768;
+    g_sync = true;
+    g_active = 0;
+
+    for (int i = 0; i < 1500; i++) {
+        if (i % 2 == 0) {
+            viewer_toggle_active_pane();
+            TEST_ASSERT(g_active == 0 || g_active == 1);
+        }
+        if (i % 3 == 0) {
+            viewer_toggle_sync();
+        }
+        if (i % 5 == 0) {
+            viewer_toggle_metadata();
+        }
+        float zoom_step = (i % 7 == 0) ? 1.5f : ((i % 7 == 1) ? 0.6f : 1.05f);
+        viewer_do_zoom(zoom_step, 512, 384);
+        TEST_ASSERT(g_zoom >= 0.05f && g_zoom <= 32.0f);
+        TEST_ASSERT(g_free_zoom[0] >= 0.05f && g_free_zoom[0] <= 32.0f);
+        TEST_ASSERT(g_free_zoom[1] >= 0.05f && g_free_zoom[1] <= 32.0f);
+
+        viewer_do_pan((i % 16) - 8, 8 - (i % 16));
+        viewer_update_title();
+
+        if (i % 10 == 0) {
+            viewer_render(g_ren);
+        }
+    }
+
+    viewer_unload_image(&g_img[0]);
+    viewer_unload_image(&g_img[1]);
+    g_count = 0;
+    unlink(trans0);
+    unlink(trans1);
+
+    // =========================================================================
+    // 4. Broken Symlinks, Corrupted/0-Byte Files, Mid-Navigation Unlinking & Chmod 000
+    // =========================================================================
+    const char *stress_dir = "/tmp/civ_stress_dir";
+    mkdir(stress_dir, 0755);
+
+    char f_01[PATH_MAX], f_02[PATH_MAX], f_03[PATH_MAX], f_04[PATH_MAX];
+    char f_05[PATH_MAX], f_06[PATH_MAX], f_07[PATH_MAX], f_08[PATH_MAX];
+    snprintf(f_01, sizeof(f_01), "%s/01_valid.png", stress_dir);
+    snprintf(f_02, sizeof(f_02), "%s/02_corrupt.png", stress_dir);
+    snprintf(f_03, sizeof(f_03), "%s/03_zero.png", stress_dir);
+    snprintf(f_04, sizeof(f_04), "%s/04_valid.png", stress_dir);
+    snprintf(f_05, sizeof(f_05), "%s/05_deleted.png", stress_dir);
+    snprintf(f_06, sizeof(f_06), "%s/06_broken.png", stress_dir);
+    snprintf(f_07, sizeof(f_07), "%s/07_noperm.png", stress_dir);
+    snprintf(f_08, sizeof(f_08), "%s/08_valid.png", stress_dir);
+
+    // 01: Valid PNG
+    TEST_ASSERT(stbi_write_png(f_01, 8, 8, 4, s_px, 8 * 4));
+
+    // 02: Corrupt image file (garbage bytes)
+    FILE *fc = fopen(f_02, "wb");
+    TEST_ASSERT(fc != NULL);
+    fputs("GARBAGE_NOT_A_PNG_FILE_HEADER_1234567890", fc);
+    fclose(fc);
+
+    // 03: 0-byte image file
+    FILE *fz = fopen(f_03, "wb");
+    TEST_ASSERT(fz != NULL);
+    fclose(fz);
+
+    // 04: Valid PNG
+    TEST_ASSERT(stbi_write_png(f_04, 8, 8, 4, s_px, 8 * 4));
+
+    // 05: Valid PNG (will be unlinked mid-navigation)
+    TEST_ASSERT(stbi_write_png(f_05, 8, 8, 4, s_px, 8 * 4));
+
+    // 06: Broken symlink pointing to nonexistent destination
+    unlink(f_06);
+    TEST_ASSERT_INT_EQ(symlink("/tmp/civ_nonexistent_dest_file.png", f_06), 0);
+
+    // 07: Regular file with permission 0000 (unreadable)
+    TEST_ASSERT(stbi_write_png(f_07, 8, 8, 4, s_px, 8 * 4));
+    TEST_ASSERT_INT_EQ(chmod(f_07, 0000), 0);
+
+    // 08: Valid PNG
+    TEST_ASSERT(stbi_write_png(f_08, 8, 8, 4, s_px, 8 * 4));
+
+    // Directory scan test: broken symlink f_06 must be excluded
+    TEST_ASSERT(viewer_scan_current_dir(f_01));
+    for (int i = 0; i < g_file_count; i++) {
+        TEST_ASSERT(strstr(g_file_list[i], "06_broken.png") == NULL);
+    }
+    // Chmod 000 file f_07 is in g_file_list because stat() succeeded on regular file
+    bool found_noperm = false;
+    for (int i = 0; i < g_file_count; i++) {
+        if (strstr(g_file_list[i], "07_noperm.png") != NULL) found_noperm = true;
+    }
+    TEST_ASSERT(found_noperm);
+
+    // Direct open & replace on broken symlink and chmod 000
+    Image bad_im = {0};
+    TEST_ASSERT(!viewer_load_image(f_06, &bad_im));
+    TEST_ASSERT(bad_im.tex == NULL && bad_im.path == NULL);
+    TEST_ASSERT(!viewer_load_image(f_07, &bad_im));
+    TEST_ASSERT(bad_im.tex == NULL && bad_im.path == NULL);
+
+    TEST_ASSERT(viewer_load_image(f_01, &g_img[0]));
+    g_count = 1;
+    // Replace with broken symlink fails and leaves pane 0 untouched
+    TEST_ASSERT(!viewer_replace_image(0, f_06));
+    TEST_ASSERT(g_img[0].path != NULL && strstr(g_img[0].path, "01_valid.png") != NULL);
+    // Replace with chmod 000 fails and leaves pane 0 untouched
+    TEST_ASSERT(!viewer_replace_image(0, f_07));
+    TEST_ASSERT(g_img[0].path != NULL && strstr(g_img[0].path, "01_valid.png") != NULL);
+
+    // Direct exif_read on broken symlink and chmod 000
+    ExifData probe_exif;
+    TEST_ASSERT(!exif_read(f_06, &probe_exif));
+    TEST_ASSERT(!probe_exif.has_exif);
+    TEST_ASSERT(!exif_read(f_07, &probe_exif));
+    TEST_ASSERT(!probe_exif.has_exif);
+
+    // Unlink f_05 mid-navigation
+    TEST_ASSERT_INT_EQ(unlink(f_05), 0);
+
+    // Navigate forward: skips 02 (corrupt) and 03 (0 bytes) -> lands on 04_valid.png
+    TEST_ASSERT(viewer_navigate(+1));
+    TEST_ASSERT(strstr(g_img[0].path, "04_valid.png") != NULL);
+
+    // Navigate forward: skips 05 (unlinked mid-test) and 07 (chmod 000) -> lands on 08_valid.png
+    TEST_ASSERT(viewer_navigate(+1));
+    TEST_ASSERT(strstr(g_img[0].path, "08_valid.png") != NULL);
+
+    // Navigate backwards: skips 07 (chmod 000) and 05 (unlinked) -> lands on 04_valid.png
+    TEST_ASSERT(viewer_navigate(-1));
+    TEST_ASSERT(strstr(g_img[0].path, "04_valid.png") != NULL);
+
+    // Navigate backwards: skips 03 (0 bytes) and 02 (corrupt) -> lands on 01_valid.png
+    TEST_ASSERT(viewer_navigate(-1));
+    TEST_ASSERT(strstr(g_img[0].path, "01_valid.png") != NULL);
+
+    // Cleanup phase 4
+    chmod(f_07, 0644);
+    unlink(f_01);
+    unlink(f_02);
+    unlink(f_03);
+    unlink(f_04);
+    unlink(f_06);
+    unlink(f_07);
+    unlink(f_08);
+    rmdir(stress_dir);
+
+    viewer_unload_image(&g_img[0]);
+    viewer_unload_image(&g_img[1]);
+    viewer_free_file_list();
+
+    // Restore original viewer state
+    g_win_w = orig_w;
+    g_win_h = orig_h;
+    g_count = orig_count;
+    g_show_info = orig_show_info;
+    g_show_metadata = orig_show_meta;
+    g_sync = orig_sync;
+    g_active = orig_active;
+    g_file_index = orig_file_index;
+    g_file_count = orig_file_count;
+    g_img[0].path = orig_p0;
+    g_img[1].path = orig_p1;
+    snprintf(g_current_dir, sizeof(g_current_dir), "%s", orig_dir);
+}
+
 void run_viewer_tests(void) {
     printf("--- Viewer Test Suite ---\n");
     TEST_RUN(test_viewer_is_image_file);
@@ -1098,6 +2208,9 @@ void run_viewer_tests(void) {
     TEST_RUN(test_viewer_calc_status_layout_single);
     TEST_RUN(test_viewer_calc_status_layout_dual);
     TEST_RUN(test_viewer_format_status);
+    TEST_RUN(test_viewer_ui_layout_invariants);
+    TEST_RUN(test_viewer_performance_benchmarks);
+    TEST_RUN(test_viewer_render_metadata_and_info_edge_cases);
     TEST_RUN(test_viewer_file_list_and_scan);
     TEST_RUN(test_viewer_load_unload);
     TEST_RUN(test_viewer_replace_and_bounds);
@@ -1109,4 +2222,8 @@ void run_viewer_tests(void) {
     TEST_RUN(test_viewer_navigate_corrupt_file_skipping);
     TEST_RUN(test_viewer_dual_pane_boundary_cases);
     TEST_RUN(test_viewer_culling_and_metadata_render);
+    TEST_RUN(test_viewer_metadata_cache_stress);
+    TEST_RUN(test_viewer_repeated_load_unload_cycles);
+    TEST_RUN(test_viewer_corrupt_load_cleanup_stress);
+    TEST_RUN(test_viewer_stress_lifecycle_and_mutation);
 }

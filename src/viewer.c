@@ -110,6 +110,7 @@ static bool path_join(char *dst, size_t dst_size, const char *dir, const char *f
  */
 void viewer_truncate_filename(const char *name, char *out, size_t out_sz, int max_len) {
     if (!out || out_sz == 0) return;
+    if (out_sz > (size_t)INT_MAX) out_sz = (size_t)INT_MAX;
     if (!name || max_len <= 0) {
         out[0] = '\0';
         return;
@@ -117,27 +118,38 @@ void viewer_truncate_filename(const char *name, char *out, size_t out_sz, int ma
     if (max_len >= (int)out_sz) {
         max_len = (int)out_sz - 1;
     }
+    if (max_len <= 0) {
+        out[0] = '\0';
+        return;
+    }
     int len = (int)strlen(name);
     if (len <= max_len) {
-        snprintf(out, out_sz, "%s", name);
+        memcpy(out, name, (size_t)len);
+        out[len] = '\0';
         return;
     }
     if (max_len <= 3) {
-        snprintf(out, out_sz, "%.*s", max_len, "...");
+        memcpy(out, "...", (size_t)max_len);
+        out[max_len] = '\0';
         return;
     }
     const char *dot = strrchr(name, '.');
     if (dot && dot != name && *(dot + 1) != '\0') {
         const char *ext = dot + 1;
-        int ext_len = (int)strlen(ext);
+        int ext_len = len - (int)(ext - name);
         if (ext_len <= max_len - 4) {
             int prefix_len = max_len - 3 - ext_len;
-            snprintf(out, out_sz, "%.*s...%s", prefix_len, name, ext);
+            memcpy(out, name, (size_t)prefix_len);
+            memcpy(out + prefix_len, "...", 3);
+            memcpy(out + prefix_len + 3, ext, (size_t)ext_len);
+            out[max_len] = '\0';
             return;
         }
     }
     int prefix_len = max_len - 3;
-    snprintf(out, out_sz, "%.*s...", prefix_len, name);
+    memcpy(out, name, (size_t)prefix_len);
+    memcpy(out + prefix_len, "...", 3);
+    out[max_len] = '\0';
 }
 
 /**
@@ -153,6 +165,7 @@ void viewer_truncate_filename(const char *name, char *out, size_t out_sz, int ma
  */
 void viewer_format_color_depth(int channels, char *out, size_t out_sz) {
     if (!out || out_sz == 0) return;
+    if (out_sz > (size_t)INT_MAX) out_sz = (size_t)INT_MAX;
     if (channels <= 0) {
         snprintf(out, out_sz, "Unknown");
     } else if (channels == 1) {
@@ -166,6 +179,7 @@ void viewer_format_color_depth(int channels, char *out, size_t out_sz) {
     } else {
         snprintf(out, out_sz, "%d channels", channels);
     }
+    out[out_sz - 1] = '\0';
 }
 
 /**
@@ -183,6 +197,7 @@ void viewer_format_color_depth(int channels, char *out, size_t out_sz) {
  */
 void viewer_truncate_path(const char *path, char *out, size_t out_sz, int max_chars) {
     if (!out || out_sz == 0) return;
+    if (out_sz > (size_t)INT_MAX) out_sz = (size_t)INT_MAX;
     if (!path || max_chars <= 0) {
         out[0] = '\0';
         return;
@@ -197,12 +212,14 @@ void viewer_truncate_path(const char *path, char *out, size_t out_sz, int max_ch
 
     int path_len = (int)strlen(path);
     if (path_len <= max_chars) {
-        snprintf(out, out_sz, "%s", path);
+        memcpy(out, path, (size_t)path_len);
+        out[path_len] = '\0';
         return;
     }
 
     if (max_chars <= 5) {
-        snprintf(out, out_sz, "%.*s", max_chars, ".....");
+        memcpy(out, ".....", (size_t)max_chars);
+        out[max_chars] = '\0';
         return;
     }
 
@@ -211,16 +228,17 @@ void viewer_truncate_path(const char *path, char *out, size_t out_sz, int max_ch
     if (*filename == '\0') {
         int prefix_len = max_chars - 3;
         if (prefix_len > 0) {
-            snprintf(out, out_sz, "%.*s...", prefix_len, path);
+            memcpy(out, path, (size_t)prefix_len);
+            memcpy(out + prefix_len, "...", 3);
+            out[max_chars] = '\0';
         } else {
-            snprintf(out, out_sz, "%.*s", max_chars, ".....");
+            memcpy(out, ".....", (size_t)max_chars);
+            out[max_chars] = '\0';
         }
-        out[out_sz - 1] = '\0';
-        if ((int)strlen(out) > max_chars) out[max_chars] = '\0';
         return;
     }
 
-    int filename_len = (int)strlen(filename);
+    int filename_len = path_len - (int)(filename - path);
     if (filename_len > max_chars) {
         viewer_truncate_filename(filename, out, out_sz, max_chars);
         return;
@@ -228,16 +246,16 @@ void viewer_truncate_path(const char *path, char *out, size_t out_sz, int max_ch
 
     int prefix_len = max_chars - (filename_len + 4);
     if (prefix_len >= 1) {
-        snprintf(out, out_sz, "%.*s.../%.*s", prefix_len, path, filename_len, filename);
+        memcpy(out, path, (size_t)prefix_len);
+        memcpy(out + prefix_len, ".../", 4);
+        memcpy(out + prefix_len + 4, filename, (size_t)filename_len);
+        out[max_chars] = '\0';
     } else if (filename_len + 4 <= max_chars) {
-        snprintf(out, out_sz, ".../%.*s", filename_len, filename);
+        memcpy(out, ".../", 4);
+        memcpy(out + 4, filename, (size_t)filename_len);
+        out[4 + filename_len] = '\0';
     } else {
         viewer_truncate_filename(filename, out, out_sz, max_chars);
-    }
-
-    out[out_sz - 1] = '\0';
-    if ((int)strlen(out) > max_chars) {
-        out[max_chars] = '\0';
     }
 }
 
@@ -253,6 +271,7 @@ void viewer_truncate_path(const char *path, char *out, size_t out_sz, int max_ch
  */
 void viewer_format_file_size(off_t size, char *out, size_t out_sz) {
     if (!out || out_sz == 0) return;
+    if (out_sz > (size_t)INT_MAX) out_sz = (size_t)INT_MAX;
     if (size <= 0) {
         snprintf(out, out_sz, "0 B");
     } else if (size < 1024) {
@@ -264,6 +283,7 @@ void viewer_format_file_size(off_t size, char *out, size_t out_sz) {
     } else {
         snprintf(out, out_sz, "%.2f GB (%lld B)", (double)size / (1024.0 * 1024.0 * 1024.0), (long long)size);
     }
+    out[out_sz - 1] = '\0';
 }
 
 /**
@@ -333,10 +353,11 @@ bool viewer_validate_image_path(const char *path, char *out_clean_path, size_t o
  * pointer itself. Safe to call multiple times or on an empty list.
  */
 void viewer_free_file_list(void) {
-    if (!g_file_list) return;
-    for (int i = 0; i < g_file_count; i++) free(g_file_list[i]);
-    free(g_file_list);
-    g_file_list = NULL;
+    if (g_file_list) {
+        for (int i = 0; i < g_file_count; i++) free(g_file_list[i]);
+        free(g_file_list);
+        g_file_list = NULL;
+    }
     g_file_count = 0;
     g_file_index = -1;
 }
@@ -359,6 +380,8 @@ static int cmp_str(const void *a, const void *b) {
  */
 bool viewer_scan_current_dir(const char *ref_path) {
     viewer_free_file_list();
+    g_file_count = 0;
+    g_file_index = -1;
     if (!ref_path || ref_path[0] == '\0') return false;
 
     char tmp[PATH_MAX];
@@ -425,6 +448,50 @@ bool viewer_scan_current_dir(const char *ref_path) {
     return true;
 }
 
+// Static metadata and EXIF cache to avoid repeated disk reads and allocations per frame
+static char s_cached_md_path[PATH_MAX] = {0};
+static ExifData s_cached_exif;
+static struct stat s_cached_st;
+static bool s_has_stat = false;
+static char s_cached_size_str[64] = "?";
+static char s_cached_mtime_str[64] = "?";
+static char s_cached_path_disp[PATH_MAX] = {0};
+
+/**
+ * Reset the cached metadata and EXIF data.
+ *
+ * Clears s_cached_md_path and zeroes cached structs so subsequent calls to
+ * viewer_render_metadata will re-stat and re-parse EXIF from disk.
+ */
+void viewer_reset_metadata_cache(void) {
+    s_cached_md_path[0] = '\0';
+    memset(&s_cached_exif, 0, sizeof(s_cached_exif));
+    memset(&s_cached_st, 0, sizeof(s_cached_st));
+    s_has_stat = false;
+    snprintf(s_cached_size_str, sizeof(s_cached_size_str), "?");
+    snprintf(s_cached_mtime_str, sizeof(s_cached_mtime_str), "?");
+    s_cached_path_disp[0] = '\0';
+}
+
+/**
+ * Query the cached metadata stat status and formatted size/mtime strings.
+ *
+ * @param size_out Optional buffer to receive cached size string.
+ * @param size_sz Size of size_out buffer.
+ * @param mtime_out Optional buffer to receive cached mtime string.
+ * @param mtime_sz Size of mtime_out buffer.
+ * @return true if s_has_stat is true, false otherwise.
+ */
+bool viewer_get_cached_stat_info(char *size_out, size_t size_sz, char *mtime_out, size_t mtime_sz) {
+    if (size_out && size_sz > 0) {
+        snprintf(size_out, size_sz, "%s", s_cached_size_str);
+    }
+    if (mtime_out && mtime_sz > 0) {
+        snprintf(mtime_out, mtime_sz, "%s", s_cached_mtime_str);
+    }
+    return s_has_stat;
+}
+
 // ---------------------------------------------------------------------------
 // Image lifecycle
 // ---------------------------------------------------------------------------
@@ -442,6 +509,7 @@ void viewer_unload_image(Image *im) {
     if (im->tex) SDL_DestroyTexture(im->tex);
     if (im->path) free(im->path);
     memset(im, 0, sizeof(*im));
+    viewer_reset_metadata_cache();
 }
 
 /**
@@ -457,7 +525,7 @@ void viewer_unload_image(Image *im) {
  */
 bool viewer_load_image(const char *path, Image *out) {
     if (!path || !out) return false;
-    memset(out, 0, sizeof(*out));
+    viewer_unload_image(out);
 
     int w = 0, h = 0, comp = 0;
     unsigned char *data = stbi_load(path, &w, &h, &comp, 4);
@@ -611,6 +679,7 @@ void viewer_fit_view(void) {
  * @param my Cursor Y coordinate in window space.
  */
 void viewer_do_zoom(float factor, int mx, int my) {
+    if (g_count == 0) return;
     if (factor <= 0.0f || isnan(factor) || isinf(factor)) return;
     if (g_win_w <= 0 || g_win_h <= 0) return;
 
@@ -658,6 +727,7 @@ void viewer_do_zoom(float factor, int mx, int my) {
  * @param dy Vertical displacement in window pixels.
  */
 void viewer_do_pan(int dx, int dy) {
+    if (g_count == 0) return;
     if (g_sync) {
         float z = g_zoom < 0.05f ? 0.05f : g_zoom;
         g_pan_x += (float)dx / z;
@@ -683,19 +753,35 @@ void viewer_do_pan(int dx, int dy) {
  */
 void viewer_toggle_sync(void) {
     if (g_sync) {
+        float z = g_zoom < 0.05f ? 0.05f : (g_zoom > 32.0f ? 32.0f : g_zoom);
         for (int i = 0; i < 2; i++) {
-            g_free_zoom[i] = g_zoom;
+            g_free_zoom[i] = z;
             g_free_pan_x[i] = g_pan_x;
             g_free_pan_y[i] = g_pan_y;
         }
         g_sync = false;
     } else {
-        int p = g_active;
-        if (p >= g_count) p = 0;
-        g_zoom = g_free_zoom[p];
+        int p = (g_active == 1) ? 1 : 0;
+        if (p >= g_count && g_count > 0) p = 0;
+        float z = g_free_zoom[p] < 0.05f ? 0.05f : (g_free_zoom[p] > 32.0f ? 32.0f : g_free_zoom[p]);
+        g_zoom = z;
         g_pan_x = g_free_pan_x[p];
         g_pan_y = g_free_pan_y[p];
         g_sync = true;
+    }
+}
+
+/**
+ * Toggle active pane between pane 0 and pane 1 in dual-pane view.
+ *
+ * In dual-pane mode (g_count == 2), switches g_active between 0 and 1.
+ * In single-pane mode, ensures g_active is 0.
+ */
+void viewer_toggle_active_pane(void) {
+    if (g_count == 2) {
+        g_active = (g_active == 1) ? 0 : 1;
+    } else {
+        g_active = 0;
     }
 }
 
@@ -741,16 +827,21 @@ void viewer_update_title(void) {
         snprintf(b1, sizeof(b1), "(empty)");
     }
 
-    float z = g_sync ? g_zoom : (g_active < 2 ? g_free_zoom[g_active] : 1.0f);
+    int active_idx = (g_active == 1) ? 1 : 0;
+    float z = g_sync ? g_zoom : g_free_zoom[active_idx];
+    if (z < 0.05f) z = 0.05f;
     int pct = (int)(z * 100.0f + 0.5f);
+    if (pct < 0) pct = 0;
+    int fidx = (g_file_index >= 0) ? (g_file_index + 1) : 0;
+    int fcnt = (g_file_count >= 0) ? g_file_count : 0;
     char title[1024];
     if (g_count == 1) {
         snprintf(title, sizeof(title), "%s — %d%% — %s — %d/%d — [i]nfo [h]elp [q]uit",
-            b0, pct, g_sync ? "SYNC" : "FREE", g_file_index + 1, g_file_count);
+            b0, pct, g_sync ? "SYNC" : "FREE", fidx, fcnt);
     } else if (g_count == 2) {
         snprintf(title, sizeof(title), "%s | %s — %d%% — %s%s — [i]nfo [h]elp",
             b0, b1, pct, g_sync ? "SYNC" : "FREE",
-            g_sync ? "" : (g_active == 0 ? " [L]" : " [R]"));
+            g_sync ? "" : (active_idx == 0 ? " [L]" : " [R]"));
     } else {
         snprintf(title, sizeof(title), "c-image-viewer");
     }
@@ -771,10 +862,9 @@ void viewer_update_title(void) {
  * @return true if an image was successfully loaded, false if no files or all unreadable.
  */
 bool viewer_navigate(int delta) {
-    if (g_file_count <= 1 || g_file_index < 0) return false;
+    if (!g_file_list || g_file_count <= 1 || g_file_index < 0 || g_file_index >= g_file_count) return false;
     int step = delta >= 0 ? 1 : -1;
-    int pane = (g_count == 1) ? 0 : g_active;
-    if (pane < 0 || pane >= 2) pane = 0;
+    int pane = (g_count <= 1) ? 0 : ((g_active == 1) ? 1 : 0);
 
     int candidate = g_file_index;
     for (int attempts = 0; attempts < g_file_count - 1; attempts++) {
@@ -789,6 +879,7 @@ bool viewer_navigate(int delta) {
         if (viewer_load_image(target, &tmp)) {
             viewer_unload_image(&g_img[pane]);
             g_img[pane] = tmp;
+            if (pane >= g_count) g_count = pane + 1;
             g_file_index = candidate;
             return true;
         }
@@ -835,24 +926,36 @@ bool viewer_go_parent(void) {
     g_file_list = NULL; g_file_count = 0; g_file_index = -1;
 
     char dummy[PATH_MAX];
-    if (!path_join(dummy, sizeof(dummy), parent, "dummy.jpg")) return false;
+    if (!path_join(dummy, sizeof(dummy), parent, "dummy.jpg")) {
+        g_file_list = saved_list;
+        g_file_count = saved_count;
+        g_file_index = saved_index;
+        return false;
+    }
     viewer_scan_current_dir(dummy);
 
     bool ok = false;
     if (g_file_count > 0) {
-        const char *first = g_file_list[0];
         char **parent_list = g_file_list;
         int parent_count = g_file_count;
 
         Image tmp_img = {0};
-        if (viewer_load_image(first, &tmp_img)) {
+        int chosen_idx = -1;
+        for (int i = 0; i < parent_count; i++) {
+            if (viewer_load_image(parent_list[i], &tmp_img)) {
+                chosen_idx = i;
+                break;
+            }
+        }
+
+        if (chosen_idx >= 0) {
             viewer_unload_image(&g_img[0]);
             g_img[0] = tmp_img;
             for (int i = 0; i < saved_count; i++) free(saved_list[i]);
             free(saved_list);
             g_file_list = parent_list;
             g_file_count = parent_count;
-            g_file_index = 0;
+            g_file_index = chosen_idx;
             snprintf(g_current_dir, sizeof(g_current_dir), "%s", parent);
             ok = true;
         } else {
@@ -888,12 +991,42 @@ static const char *s_hint_single[VIEWER_HINT_TIER_COUNT] = {
     "[s]ync [Tab] pane [f]ull [n/p] next/prev [e] exif [ESC] browser"     // VIEWER_HINT_FULL
 };
 
+static const int s_hint_single_cost[VIEWER_HINT_TIER_COUNT] = {
+    0,   // NONE: 0 chars, 0 hint_cost
+    (int)sizeof("[e] exif [ESC]") - 1 + 2,
+    (int)sizeof("[s]ync [f]ull [n/p] [e]xif [ESC]") - 1 + 2,
+    (int)sizeof("[s]ync [Tab] pane [f]ull [n/p] next/prev [e] exif [ESC] browser") - 1 + 2
+};
+
 static const char *s_hint_dual[VIEWER_HINT_TIER_COUNT] = {
     "",                                                                   // VIEWER_HINT_NONE
     "[e] exif",                                                           // VIEWER_HINT_MINIMAL
     "[s]ync [Tab] pane [e] exif",                                         // VIEWER_HINT_COMPACT
     "[s]ync [Tab] pane [f]ull [e] exif [ESC] browser"                     // VIEWER_HINT_FULL
 };
+
+static const int s_hint_dual_cost[VIEWER_HINT_TIER_COUNT] = {
+    0,   // NONE: 0 chars, 0 hint_cost
+    (int)sizeof("[e] exif") - 1 + 2,
+    (int)sizeof("[s]ync [Tab] pane [e] exif") - 1 + 2,
+    (int)sizeof("[s]ync [Tab] pane [f]ull [e] exif [ESC] browser") - 1 + 2
+};
+
+/**
+ * Return number of decimal digits required to represent a non-negative integer.
+ */
+static inline int viewer_int_digits(int v) {
+    if (v < 10) return 1;
+    if (v < 100) return 2;
+    if (v < 1000) return 3;
+    if (v < 10000) return 4;
+    if (v < 100000) return 5;
+    if (v < 1000000) return 6;
+    if (v < 10000000) return 7;
+    if (v < 100000000) return 8;
+    if (v < 1000000000) return 9;
+    return 10;
+}
 
 /**
  * Distribute available filename character budget between dual panes.
@@ -961,23 +1094,30 @@ ViewerStatusBarLayout viewer_calc_status_layout_single(
     int zoom_pct, bool is_sync, int file_idx, int file_count)
 {
     (void)name;
+    (void)is_sync;
     ViewerStatusBarLayout layout;
     memset(&layout, 0, sizeof(layout));
 
-    int usable_chars = (win_w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W;
-    if (usable_chars < 0) usable_chars = 0;
+    int usable_chars = 0;
+    if (win_w > 2 * VIEWER_INFO_MARGIN_X) {
+        usable_chars = (win_w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W;
+    }
     layout.usable_chars = usable_chars;
 
-    char meta[256];
-    int meta_len = snprintf(meta, sizeof(meta), "%dx%d  %d%%  %s  %d/%d",
-        img_w, img_h, zoom_pct, is_sync ? "SYNC" : "FREE", file_idx, file_count);
-    if (meta_len < 0) meta_len = 0;
+    if (img_w < 0) img_w = 0;
+    if (img_h < 0) img_h = 0;
+    if (zoom_pct < 0) zoom_pct = 0;
+    if (file_idx < 0) file_idx = 0;
+    if (file_count < 0) file_count = 0;
+
+    // Fixed metadata length: "%dx%d  %d%%  %s  %d/%d"
+    // Constants: 'x'(1) + "  "(2) + "%  "(3) + "SYNC"/"FREE"(4) + "  "(2) + '/'(1) = 13
+    int meta_len = 13 + viewer_int_digits(img_w) + viewer_int_digits(img_h) +
+                   viewer_int_digits(zoom_pct) + viewer_int_digits(file_idx) +
+                   viewer_int_digits(file_count);
 
     for (int t = (int)VIEWER_HINT_FULL; t >= (int)VIEWER_HINT_NONE; t--) {
-        const char *hint = s_hint_single[t];
-        int hint_len = (int)strlen(hint);
-        int hint_cost = (hint_len > 0) ? (2 + hint_len) : 0;
-        int cost = 2 + meta_len + hint_cost;
+        int cost = 2 + meta_len + s_hint_single_cost[t];
         int rem = usable_chars - cost;
 
         if (t == (int)VIEWER_HINT_NONE || rem >= VIEWER_INFO_NAME_TARGET_SINGLE) {
@@ -1021,22 +1161,30 @@ ViewerStatusBarLayout viewer_calc_status_layout_dual(
     const char *name1, int img1_w, int img1_h,
     int zoom_pct, bool is_sync, int active_pane)
 {
+    (void)active_pane;
     ViewerStatusBarLayout layout;
     memset(&layout, 0, sizeof(layout));
 
-    int usable_chars = (win_w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W;
-    if (usable_chars < 0) usable_chars = 0;
+    int usable_chars = 0;
+    if (win_w > 2 * VIEWER_INFO_MARGIN_X) {
+        usable_chars = (win_w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W;
+    }
     layout.usable_chars = usable_chars;
 
-    char p0_buf[128];
-    char p1_buf[128];
-    const char *pane_ind = is_sync ? "" : (active_pane == 0 ? " [L*]" : " [R*]");
-    int p0_len = snprintf(p0_buf, sizeof(p0_buf), " (%dx%d) | ", img0_w, img0_h);
-    int p1_len = snprintf(p1_buf, sizeof(p1_buf), " (%dx%d)  %d%%  %s%s",
-        img1_w, img1_h, zoom_pct, is_sync ? "SYNC" : "FREE", pane_ind);
-    if (p0_len < 0) p0_len = 0;
-    if (p1_len < 0) p1_len = 0;
-    int fixed_meta_len = p0_len + p1_len;
+    if (img0_w < 0) img0_w = 0;
+    if (img0_h < 0) img0_h = 0;
+    if (img1_w < 0) img1_w = 0;
+    if (img1_h < 0) img1_h = 0;
+    if (zoom_pct < 0) zoom_pct = 0;
+
+    // Fixed dual metadata length: " (%dx%d) | " + " (%dx%d)  %d%%  %s%s"
+    // p0 constants: " ("(2) + 'x'(1) + ") | "(4) = 7
+    // p1 constants: " ("(2) + 'x'(1) + ")  "(3) + "%  "(3) + "SYNC"/"FREE"(4) = 13, pane_ind: is_sync ? 0 : 5
+    // Total constants = 7 + 13 + (is_sync ? 0 : 5) = 20 + (is_sync ? 0 : 5)
+    int fixed_meta_len = 20 + (is_sync ? 0 : 5) +
+                         viewer_int_digits(img0_w) + viewer_int_digits(img0_h) +
+                         viewer_int_digits(img1_w) + viewer_int_digits(img1_h) +
+                         viewer_int_digits(zoom_pct);
 
     const char *b0 = name0 ? strrchr(name0, '/') : NULL;
     const char *fname0 = b0 ? b0 + 1 : (name0 ? name0 : "");
@@ -1048,10 +1196,7 @@ ViewerStatusBarLayout viewer_calc_status_layout_dual(
     int target_dual = 2 * VIEWER_INFO_NAME_TARGET_DUAL;
 
     for (int t = (int)VIEWER_HINT_FULL; t >= (int)VIEWER_HINT_NONE; t--) {
-        const char *hint = s_hint_dual[t];
-        int hint_len = (int)strlen(hint);
-        int hint_cost = (hint_len > 0) ? (2 + hint_len) : 0;
-        int cost = fixed_meta_len + hint_cost;
+        int cost = fixed_meta_len + s_hint_dual_cost[t];
         int rem = usable_chars - cost;
 
         if (t == (int)VIEWER_HINT_NONE || rem >= target_dual) {
@@ -1095,8 +1240,15 @@ int viewer_format_status_single(
     int file_idx, int file_count, char *out_buf, size_t out_sz)
 {
     if (!out_buf || out_sz == 0) return 0;
+    if (out_sz > (size_t)INT_MAX) out_sz = (size_t)INT_MAX;
     out_buf[0] = '\0';
     if (!layout) return 0;
+
+    if (img_w < 0) img_w = 0;
+    if (img_h < 0) img_h = 0;
+    if (zoom_pct < 0) zoom_pct = 0;
+    if (file_idx < 0) file_idx = 0;
+    if (file_count < 0) file_count = 0;
 
     const char *b = name ? strrchr(name, '/') : NULL;
     const char *fname = b ? b + 1 : (name ? name : "");
@@ -1110,17 +1262,25 @@ int viewer_format_status_single(
     }
     const char *hint = s_hint_single[tier];
 
+    int written = 0;
     if (hint && hint[0] != '\0') {
-        snprintf(out_buf, out_sz, "%s  %dx%d  %d%%  %s  %d/%d  %s",
+        written = snprintf(out_buf, out_sz, "%s  %dx%d  %d%%  %s  %d/%d  %s",
             trunc, img_w, img_h, zoom_pct, is_sync ? "SYNC" : "FREE",
             file_idx, file_count, hint);
     } else {
-        snprintf(out_buf, out_sz, "%s  %dx%d  %d%%  %s  %d/%d",
+        written = snprintf(out_buf, out_sz, "%s  %dx%d  %d%%  %s  %d/%d",
             trunc, img_w, img_h, zoom_pct, is_sync ? "SYNC" : "FREE",
             file_idx, file_count);
     }
-    out_buf[out_sz - 1] = '\0';
-    return (int)strlen(out_buf);
+    if (written < 0) {
+        out_buf[0] = '\0';
+        return 0;
+    }
+    if ((size_t)written >= out_sz) {
+        out_buf[out_sz - 1] = '\0';
+        return (int)out_sz - 1;
+    }
+    return written;
 }
 
 /**
@@ -1151,8 +1311,16 @@ int viewer_format_status_dual(
     int active_pane, char *out_buf, size_t out_sz)
 {
     if (!out_buf || out_sz == 0) return 0;
+    if (out_sz > (size_t)INT_MAX) out_sz = (size_t)INT_MAX;
     out_buf[0] = '\0';
     if (!layout) return 0;
+
+    if (img0_w < 0) img0_w = 0;
+    if (img0_h < 0) img0_h = 0;
+    if (img1_w < 0) img1_w = 0;
+    if (img1_h < 0) img1_h = 0;
+    if (zoom_pct < 0) zoom_pct = 0;
+    int act = (active_pane == 1) ? 1 : 0;
 
     const char *b0 = name0 ? strrchr(name0, '/') : NULL;
     const char *fname0 = b0 ? b0 + 1 : (name0 ? name0 : "");
@@ -1164,7 +1332,7 @@ int viewer_format_status_dual(
     viewer_truncate_filename(fname0, trunc0, sizeof(trunc0), layout->name_budget[0]);
     viewer_truncate_filename(fname1, trunc1, sizeof(trunc1), layout->name_budget[1]);
 
-    const char *pane_ind = is_sync ? "" : (active_pane == 0 ? " [L*]" : " [R*]");
+    const char *pane_ind = is_sync ? "" : (act == 0 ? " [L*]" : " [R*]");
 
     ViewerHintTier tier = layout->hint_tier;
     if (tier < 0 || tier >= VIEWER_HINT_TIER_COUNT) {
@@ -1172,17 +1340,25 @@ int viewer_format_status_dual(
     }
     const char *hint = s_hint_dual[tier];
 
+    int written = 0;
     if (hint && hint[0] != '\0') {
-        snprintf(out_buf, out_sz, "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s  %s",
+        written = snprintf(out_buf, out_sz, "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s  %s",
             trunc0, img0_w, img0_h, trunc1, img1_w, img1_h, zoom_pct,
             is_sync ? "SYNC" : "FREE", pane_ind, hint);
     } else {
-        snprintf(out_buf, out_sz, "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s",
+        written = snprintf(out_buf, out_sz, "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s",
             trunc0, img0_w, img0_h, trunc1, img1_w, img1_h, zoom_pct,
             is_sync ? "SYNC" : "FREE", pane_ind);
     }
-    out_buf[out_sz - 1] = '\0';
-    return (int)strlen(out_buf);
+    if (written < 0) {
+        out_buf[0] = '\0';
+        return 0;
+    }
+    if ((size_t)written >= out_sz) {
+        out_buf[out_sz - 1] = '\0';
+        return (int)out_sz - 1;
+    }
+    return written;
 }
 
 /**
@@ -1203,16 +1379,21 @@ void viewer_render_info_bar(SDL_Renderer *ren) {
     SDL_RenderFillRect(ren, &bar);
 
     char line[1024];
-    float z = g_sync ? g_zoom : g_free_zoom[g_active];
+    int active_idx = (g_active == 1) ? 1 : 0;
+    float z = g_sync ? g_zoom : g_free_zoom[active_idx];
+    if (z < 0.05f) z = 0.05f;
     int pct = (int)(z * 100.0f + 0.5f);
+    if (pct < 0) pct = 0;
     int len = 0;
     if (g_count == 1) {
         const char *b = g_img[0].path ? strrchr(g_img[0].path, '/') : NULL;
         b = b ? b + 1 : (g_img[0].path ? g_img[0].path : "?");
+        int fidx = (g_file_index >= 0) ? (g_file_index + 1) : 0;
+        int fcnt = (g_file_count >= 0) ? g_file_count : 0;
         ViewerStatusBarLayout layout = viewer_calc_status_layout_single(
-            g_win_w, b, g_img[0].w, g_img[0].h, pct, g_sync, g_file_index + 1, g_file_count);
+            g_win_w, b, g_img[0].w, g_img[0].h, pct, g_sync, fidx, fcnt);
         len = viewer_format_status_single(
-            &layout, b, g_img[0].w, g_img[0].h, pct, g_sync, g_file_index + 1, g_file_count,
+            &layout, b, g_img[0].w, g_img[0].h, pct, g_sync, fidx, fcnt,
             line, sizeof(line));
     } else if (g_count == 2) {
         const char *b0 = g_img[0].path ? strrchr(g_img[0].path, '/') : NULL;
@@ -1220,17 +1401,22 @@ void viewer_render_info_bar(SDL_Renderer *ren) {
         b0 = b0 ? b0 + 1 : (g_img[0].path ? g_img[0].path : "?");
         b1 = b1 ? b1 + 1 : (g_img[1].path ? g_img[1].path : "?");
         ViewerStatusBarLayout layout = viewer_calc_status_layout_dual(
-            g_win_w, b0, g_img[0].w, g_img[0].h, b1, g_img[1].w, g_img[1].h, pct, g_sync, g_active);
+            g_win_w, b0, g_img[0].w, g_img[0].h, b1, g_img[1].w, g_img[1].h, pct, g_sync, active_idx);
         len = viewer_format_status_dual(
-            &layout, b0, g_img[0].w, g_img[0].h, b1, g_img[1].w, g_img[1].h, pct, g_sync, g_active,
+            &layout, b0, g_img[0].w, g_img[0].h, b1, g_img[1].w, g_img[1].h, pct, g_sync, active_idx,
             line, sizeof(line));
     } else {
         return;
     }
     if (len <= 0) return;
     SDL_Color white = {220, 220, 220, 255};
-    int max_chars = (g_win_w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W;
-    if (max_chars < 0) max_chars = 0;
+    int max_chars = 0;
+    if (g_win_w > 2 * VIEWER_INFO_MARGIN_X) {
+        max_chars = (g_win_w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W;
+    }
+    if (max_chars >= (int)sizeof(line)) {
+        max_chars = (int)sizeof(line) - 1;
+    }
     if (len > max_chars) line[max_chars] = '\0';
     text_draw(ren, VIEWER_INFO_MARGIN_X, g_win_h - bar_h + 7, line, white, 1);
 }
@@ -1312,6 +1498,71 @@ void viewer_toggle_metadata(void) {
 }
 
 /**
+ * Calculate dynamic metadata overlay panel layout based on window dimensions.
+ *
+ * Adapts panel width, column positions, and height to window size while ensuring
+ * that labels and values do not overlap or overflow right margin, and that footer
+ * never overlaps title or rows.
+ *
+ * @param win_w Window width in pixels.
+ * @param win_h Window height in pixels.
+ * @param exif_rows Number of EXIF rows to accommodate.
+ * @return Calculated ViewerMetadataLayout struct.
+ */
+ViewerMetadataLayout viewer_calc_metadata_layout(int win_w, int win_h, int exif_rows) {
+    ViewerMetadataLayout layout;
+    memset(&layout, 0, sizeof(layout));
+
+    if (win_w <= 0 || win_h <= 0) return layout;
+    if (exif_rows < 0) exif_rows = 0;
+
+    int pw = VIEWER_METADATA_STANDARD_PW;
+    if (pw > win_w - 40) pw = win_w - 40;
+    if (pw < VIEWER_METADATA_MIN_PW) return layout;
+
+    const int line_h = 14;
+    int ph = 36 + (5 * line_h) + 26 + (exif_rows * line_h) + 12 + 20;
+    if (ph > win_h - 40) ph = win_h - 40;
+    if (ph < VIEWER_METADATA_MIN_PH) return layout;
+
+    int px = win_w - pw - 12;
+    if (px < 0) px = 0;
+    int py = (win_h - ph) / 2;
+    if (py < 0) py = 0;
+
+    int inner_w = pw - 24;
+    if (inner_w <= 0) return layout;
+
+    // Adapt column layout: standard 100px label if pw >= 300, else proportional
+    int label_col_w = (pw >= 300) ? 100 : (inner_w * 38 / 100);
+    if (label_col_w < 48) label_col_w = 48;
+    int label_x = px + 12;
+
+    int gap = 8;
+    int value_x = label_x + label_col_w + gap;
+    int value_w = px + pw - 12 - value_x;
+    if (value_w <= 0) {
+        label_col_w = (inner_w - gap) / 2;
+        value_x = label_x + label_col_w + gap;
+        value_w = px + pw - 12 - value_x;
+        if (value_w <= 0) return layout;
+    }
+
+    layout.visible = true;
+    layout.px = px;
+    layout.py = py;
+    layout.pw = pw;
+    layout.ph = ph;
+    layout.label_x = label_x;
+    layout.label_w = label_col_w;
+    layout.value_x = value_x;
+    layout.value_w = value_w;
+    layout.footer_y = py + ph - 20;
+
+    return layout;
+}
+
+/**
  * Render right-side metadata panel (when g_show_metadata is true).
  *
  * Shows file system info (dimensions, color format, size, mtime, path) and EXIF
@@ -1322,34 +1573,47 @@ void viewer_toggle_metadata(void) {
  */
 void viewer_render_metadata(SDL_Renderer *ren) {
     if (!g_show_metadata || !ren || g_win_w <= 0 || g_win_h <= 0) return;
-    // Choose active pane's image for metadata (or pane 0 if sync)
-    int pane = g_sync ? 0 : g_active;
+    if (g_count <= 0) return;
+    int pane = (g_count == 1) ? 0 : g_active;
     if (pane < 0 || pane >= g_count) pane = 0;
-    if (g_count == 0 || !g_img[pane].path) return;
+    if (!g_img[pane].path) return;
 
     const char *path = g_img[pane].path;
     Image *im = &g_img[pane];
-
-    // Cache EXIF and file stat to avoid repeated disk reads and 128KB allocations per frame
-    static char s_cached_md_path[PATH_MAX] = {0};
-    static ExifData s_cached_exif;
-    static struct stat s_cached_st;
-    static bool s_has_stat = false;
 
     if (strcmp(s_cached_md_path, path) != 0) {
         snprintf(s_cached_md_path, sizeof(s_cached_md_path), "%s", path);
         s_has_stat = (stat(path, &s_cached_st) == 0);
         exif_read(path, &s_cached_exif);
-    }
 
-    struct stat st = s_cached_st;
-    bool has_stat = s_has_stat;
-    char size_str[64] = "?";
-    char mtime_str[64] = "?";
-    if (has_stat) {
-        viewer_format_file_size(s_cached_st.st_size, size_str, sizeof(size_str));
-        struct tm *tm = localtime(&st.st_mtime);
-        if (tm) strftime(mtime_str, sizeof(mtime_str), "%Y-%m-%d %H:%M", tm);
+        if (s_has_stat) {
+            viewer_format_file_size(s_cached_st.st_size, s_cached_size_str, sizeof(s_cached_size_str));
+            struct tm tm;
+            if (localtime_r(&s_cached_st.st_mtime, &tm)) {
+                if (strftime(s_cached_mtime_str, sizeof(s_cached_mtime_str), "%Y-%m-%d %H:%M", &tm) == 0) {
+                    snprintf(s_cached_mtime_str, sizeof(s_cached_mtime_str), "?");
+                }
+            } else {
+                snprintf(s_cached_mtime_str, sizeof(s_cached_mtime_str), "?");
+            }
+        } else {
+            memset(&s_cached_st, 0, sizeof(s_cached_st));
+            snprintf(s_cached_size_str, sizeof(s_cached_size_str), "?");
+            snprintf(s_cached_mtime_str, sizeof(s_cached_mtime_str), "?");
+        }
+
+        // Shorten home prefix once
+        const char *home = getenv("HOME");
+        if (home && home[0] != '\0' && strcmp(home, "/") != 0) {
+            size_t hlen = strlen(home);
+            if (strncmp(path, home, hlen) == 0 && (path[hlen] == '/' || path[hlen] == '\0')) {
+                snprintf(s_cached_path_disp, sizeof(s_cached_path_disp), "~%s", path + hlen);
+            } else {
+                snprintf(s_cached_path_disp, sizeof(s_cached_path_disp), "%s", path);
+            }
+        } else {
+            snprintf(s_cached_path_disp, sizeof(s_cached_path_disp), "%s", path);
+        }
     }
 
     ExifData exif = s_cached_exif;
@@ -1370,17 +1634,13 @@ void viewer_render_metadata(SDL_Renderer *ren) {
         if (exif.exif_width && exif.exif_height) exif_rows++;
     }
 
-    // Panel geometry: 380px wide, height calculated to fit file rows, EXIF rows, and footer
-    int pw = 380;
-    if (pw > g_win_w - 40) pw = g_win_w - 40;
-    if (pw <= 0) return;
-    int ph = 36 + (5 * line_h) + 26 + (exif_rows * line_h) + 12 + 20;
-    if (ph > g_win_h - 40) ph = g_win_h - 40;
-    if (ph <= 0) return;
-    int px = g_win_w - pw - 12;
-    if (px < 0) px = 0;
-    int py = (g_win_h - ph) / 2;
-    if (py < 0) py = 0;
+    ViewerMetadataLayout layout = viewer_calc_metadata_layout(g_win_w, g_win_h, exif_rows);
+    if (!layout.visible) return;
+
+    int px = layout.px;
+    int py = layout.py;
+    int pw = layout.pw;
+    int ph = layout.ph;
 
     // Background
     SDL_Rect bg = {px, py, pw, ph};
@@ -1427,78 +1687,68 @@ void viewer_render_metadata(SDL_Renderer *ren) {
     text_draw(ren, px+8, py+9, title, title_col, 1);
 
     int y = py + 36;
-    int label_x = px + 12;
-    int value_x = px + 120;
+    int label_x = layout.label_x;
+    int label_w = layout.label_w;
+    int value_x = layout.value_x;
+    int value_w = layout.value_w;
 
     // Helper macro to draw label/value pairs and advance y
     #define MD_ROW(label, value) do { \
-        if (y + line_h <= py + ph - 20) { \
-            text_draw(ren, label_x, y, label, label_col, 1); \
-            text_draw_clipped(ren, value_x, y, value, value_col, 1, pw - (value_x - px) - 12); \
+        if (y + line_h <= layout.footer_y) { \
+            text_draw_clipped(ren, label_x, y, label, label_col, 1, label_w); \
+            text_draw_clipped(ren, value_x, y, value, value_col, 1, value_w); \
         } \
         y += line_h; \
     } while(0)
 
     char dim[64];
-    snprintf(dim, sizeof(dim), "%d x %d", im->w, im->h);
+    snprintf(dim, sizeof(dim), "%d x %d", im->w > 0 ? im->w : 0, im->h > 0 ? im->h : 0);
     MD_ROW("Dimensions", dim);
 
     char color_str[32];
     viewer_format_color_depth(im->channels, color_str, sizeof(color_str));
     MD_ROW("Format", color_str);
 
-    MD_ROW("File size", size_str);
-    MD_ROW("Modified", mtime_str);
-    // Path (show full, truncated)
-    char path_disp[PATH_MAX];
-    snprintf(path_disp, sizeof(path_disp), "%s", path);
-    // Shorten home prefix
-    const char *home = getenv("HOME");
-    if (home && home[0] != '\0' && strcmp(home, "/") != 0) {
-        size_t hlen = strlen(home);
-        if (strncmp(path_disp, home, hlen) == 0 && (path_disp[hlen] == '/' || path_disp[hlen] == '\0')) {
-            char tmp[PATH_MAX];
-            snprintf(tmp, sizeof(tmp), "~%s", path_disp + hlen);
-            snprintf(path_disp, sizeof(path_disp), "%s", tmp);
-        }
-    }
-    int max_path_chars = (pw - (value_x - px) - 12) / 8;
+    MD_ROW("File size", s_cached_size_str);
+    MD_ROW("Modified", s_cached_mtime_str);
+
+    int max_path_chars = (value_w > 0) ? (value_w / 8) : 0;
     char trunc_path[PATH_MAX];
-    viewer_truncate_path(path_disp, trunc_path, sizeof(trunc_path), max_path_chars);
+    viewer_truncate_path(s_cached_path_disp, trunc_path, sizeof(trunc_path), max_path_chars);
     MD_ROW("Path", trunc_path);
 
     y += 4;
-    // Separator
-    if (y <= py + ph - 20) {
+    // Separator (only draw if separator, spacing, and EXIF header fit above footer)
+    if (y + 8 + line_h <= layout.footer_y) {
         SDL_SetRenderDrawColor(ren, 50, 50, 50, 255);
         SDL_RenderDrawLine(ren, px+12, y, px+pw-12, y);
     }
     y += 8;
-    if (y + line_h <= py + ph - 20) {
-        text_draw(ren, label_x, y, "EXIF", label_col, 1);
+    if (y + line_h <= layout.footer_y) {
+        text_draw_clipped(ren, label_x, y, "EXIF", label_col, 1, pw - 24);
     }
     y += line_h;
 
     if (!exif.has_exif) {
-        if (y + line_h <= py + ph - 20) {
-            text_draw(ren, label_x, y, "No EXIF data", dim_col, 1);
+        if (y + line_h <= layout.footer_y) {
+            text_draw_clipped(ren, label_x, y, "No EXIF data", dim_col, 1, pw - 24);
         }
         y += line_h;
     } else {
         if (exif.make[0] || exif.model[0]) {
-            char cam[128]; snprintf(cam, sizeof(cam), "%s %s", exif.make, exif.model);
+            char cam[160]; snprintf(cam, sizeof(cam), "%s %s", exif.make, exif.model);
             MD_ROW("Camera", cam);
         }
         if (exif.datetime[0]) MD_ROW("Date", exif.datetime);
         if (exif.software[0]) MD_ROW("Software", exif.software);
-        char ori[16]; snprintf(ori, sizeof(ori), "%d", exif.orientation);
+        char ori[32]; snprintf(ori, sizeof(ori), "%d", exif.orientation);
         MD_ROW("Orientation", ori);
-        if (exif.iso) { char s[16]; snprintf(s, sizeof(s), "ISO %d", exif.iso); MD_ROW("ISO", s); }
+        if (exif.iso) { char s[32]; snprintf(s, sizeof(s), "ISO %d", exif.iso); MD_ROW("ISO", s); }
         if (exif.exposure[0]) MD_ROW("Exposure", exif.exposure);
         if (exif.fnumber[0]) MD_ROW("Aperture", exif.fnumber);
         if (exif.focal[0]) MD_ROW("Focal", exif.focal);
         if (exif.exif_width && exif.exif_height) {
-            char s[32]; snprintf(s, sizeof(s), "%d x %d", exif.exif_width, exif.exif_height);
+            char s[64]; snprintf(s, sizeof(s), "%d x %d", exif.exif_width, exif.exif_height);
             MD_ROW("EXIF size", s);
         }
     }
@@ -1506,12 +1756,12 @@ void viewer_render_metadata(SDL_Renderer *ren) {
     #undef MD_ROW
 
     // Footer hint
-    SDL_Rect footer = {px, py+ph-20, pw, 20};
+    SDL_Rect footer = {px, layout.footer_y, pw, 20};
     SDL_SetRenderDrawColor(ren, 38, 38, 38, 255);
     SDL_RenderFillRect(ren, &footer);
     SDL_SetRenderDrawColor(ren, 70, 70, 70, 255);
-    SDL_RenderDrawLine(ren, px, py+ph-20, px+pw, py+ph-20);
-    text_draw(ren, px+8, py+ph-14, "Press e to close", dim_col, 1);
+    SDL_RenderDrawLine(ren, px, layout.footer_y, px+pw, layout.footer_y);
+    text_draw_clipped(ren, px+8, layout.footer_y + 6, "Press e to close", dim_col, 1, pw - 16);
 }
 
 /**
@@ -1522,6 +1772,7 @@ void viewer_render_metadata(SDL_Renderer *ren) {
  */
 static void viewer_render_pane(SDL_Renderer *ren, int pane_idx, SDL_Rect clip) {
     if (!ren || pane_idx < 0 || pane_idx >= 2) return;
+    if (clip.w <= 0 || clip.h <= 0) return;
     Image *im = &g_img[pane_idx];
 
     SDL_RenderSetClipRect(ren, &clip);

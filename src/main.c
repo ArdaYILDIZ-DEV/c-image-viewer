@@ -201,7 +201,7 @@ static void handle_keydown(SDL_Keycode key, SDL_Keymod mod, bool *running) {
         break;
     case SDLK_TAB:
         if (!g_sync && g_count == 2) {
-            g_active = 1 - g_active;
+            viewer_toggle_active_pane();
             viewer_update_title();
         }
         break;
