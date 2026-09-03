@@ -64,22 +64,31 @@ static void print_usage(const char *prog) {
 }
 
 /**
+ * Replace image in target pane, fit viewport, and synchronize file browser root.
+ *
+ * @param pane Target pane index (0 or 1).
+ * @param path Validated path to replacement image file.
+ */
+static void apply_pane_replacement(int pane, const char *path) {
+    if (viewer_replace_image(pane, path)) {
+        viewer_fit_view();
+        viewer_update_title();
+        browser_set_root(g_current_dir);
+    }
+}
+
+/**
  * Handle a dropped file by replacing the pane under the cursor and updating browser root.
  *
  * @param dropped File path provided by SDL_DROPFILE event (freed with SDL_free).
  */
 static void handle_drop_file(char *dropped) {
     if (!dropped) return;
-    char clean_path[PATH_MAX];
-    if (viewer_validate_image_path(dropped, clean_path, sizeof(clean_path))) {
+    char clean[PATH_MAX];
+    if (viewer_validate_image_path(dropped, clean, sizeof(clean))) {
         int mx = 0, my = 0;
         SDL_GetMouseState(&mx, &my);
-        int target = (g_count == 2 && mx >= g_win_w / 2) ? 1 : 0;
-        if (viewer_replace_image(target, clean_path)) {
-            viewer_fit_view();
-            viewer_update_title();
-            browser_set_root(g_current_dir);
-        }
+        apply_pane_replacement((g_count == 2 && mx >= g_win_w / 2) ? 1 : 0, clean);
     } else {
         fprintf(stderr, "Rejected invalid dropped file: %s\n", dropped);
     }
@@ -105,11 +114,7 @@ static void handle_clipboard_paste(void) {
     char *tmp = clipboard_paste_to_temp();
     if (tmp) {
         int pane = (g_count == 1) ? 0 : g_active;
-        if (viewer_replace_image(pane, tmp)) {
-            viewer_fit_view();
-            viewer_update_title();
-            browser_set_root(g_current_dir);
-        }
+        apply_pane_replacement(pane, tmp);
         unlink(tmp);
         free(tmp);
     } else {
@@ -137,103 +142,57 @@ static void handle_keydown(SDL_Keycode key, SDL_Keymod mod, bool *running) {
         }
     }
 
+    bool need_title = false;
     switch (key) {
-    case SDLK_q:
-        if (!(mod & KMOD_CTRL)) *running = false;
-        break;
+    case SDLK_q: if (!(mod & KMOD_CTRL)) *running = false; break;
     case SDLK_ESCAPE:
-        if (g_show_help) {
-            g_show_help = false;
-        } else if (g_show_metadata) {
-            g_show_metadata = false;
-        } else if (g_fullscreen) {
-            viewer_toggle_fullscreen();
-            viewer_update_title();
-        } else {
-            browser_toggle();
-        }
+        if (g_show_help) g_show_help = false;
+        else if (g_show_metadata) g_show_metadata = false;
+        else if (g_fullscreen) { viewer_toggle_fullscreen(); need_title = true; }
+        else browser_toggle();
         break;
-    case SDLK_e:
-        if (!(mod & KMOD_CTRL)) viewer_toggle_metadata();
-        break;
-    case SDLK_0:
-        viewer_fit_view();
-        viewer_update_title();
-        break;
+    case SDLK_e: if (!(mod & KMOD_CTRL)) viewer_toggle_metadata(); break;
+    case SDLK_0: viewer_fit_view(); need_title = true; break;
     case SDLK_f:
-        if (mod & KMOD_CTRL) viewer_fit_view();
-        else viewer_toggle_fullscreen();
-        viewer_update_title();
-        break;
-    case SDLK_F11:
-        viewer_toggle_fullscreen();
-        viewer_update_title();
-        break;
+    case SDLK_F11: viewer_toggle_fullscreen(); need_title = true; break;
     case SDLK_1:
-    case SDLK_KP_1:
-        if (g_sync) {
-            g_zoom = 1.0f; g_pan_x = 0.0f; g_pan_y = 0.0f;
-            for (int i = 0; i < 2; i++) {
-                g_free_zoom[i] = 1.0f; g_free_pan_x[i] = 0.0f; g_free_pan_y[i] = 0.0f;
-            }
-        } else {
-            int p = (g_active < g_count) ? g_active : 0;
-            g_free_zoom[p] = 1.0f; g_free_pan_x[p] = 0.0f; g_free_pan_y[p] = 0.0f;
-        }
-        viewer_update_title();
-        break;
+    case SDLK_KP_1: viewer_reset_1to1(); need_title = true; break;
     case SDLK_PLUS:
     case SDLK_EQUALS:
     case SDLK_KP_PLUS:
-        viewer_do_zoom(1.1f, g_win_w / 2, g_win_h / 2);
-        viewer_update_title();
-        break;
     case SDLK_MINUS:
-    case SDLK_KP_MINUS:
-        viewer_do_zoom(0.9f, g_win_w / 2, g_win_h / 2);
-        viewer_update_title();
+    case SDLK_KP_MINUS: {
+        float f = (key == SDLK_MINUS || key == SDLK_KP_MINUS) ? 0.9f : 1.1f;
+        viewer_do_zoom(f, g_win_w / 2, g_win_h / 2);
+        need_title = true;
         break;
-    case SDLK_i:
-        g_show_info = !g_show_info;
-        break;
+    }
+    case SDLK_i: g_show_info = !g_show_info; break;
     case SDLK_h:
-    case SDLK_SLASH:
-        g_show_help = !g_show_help;
-        break;
-    case SDLK_s:
-        viewer_toggle_sync();
-        viewer_update_title();
-        break;
+    case SDLK_SLASH: g_show_help = !g_show_help; break;
+    case SDLK_s: viewer_toggle_sync(); need_title = true; break;
     case SDLK_TAB:
         if (!g_sync && g_count == 2) {
             viewer_toggle_active_pane();
-            viewer_update_title();
+            need_title = true;
         }
         break;
     case SDLK_n:
     case SDLK_RIGHT:
     case SDLK_PAGEDOWN:
-        if (!browser_is_open() && viewer_navigate(+1)) {
-            viewer_fit_view();
-            viewer_update_title();
-        } else if (browser_is_open()) {
-            browser_handle_key(key, mod);
-        }
-        break;
     case SDLK_p:
     case SDLK_LEFT:
-    case SDLK_PAGEUP:
-        if (!browser_is_open() && viewer_navigate(-1)) {
+    case SDLK_PAGEUP: {
+        int dir = (key == SDLK_p || key == SDLK_LEFT || key == SDLK_PAGEUP) ? -1 : +1;
+        if (!browser_is_open() && viewer_navigate(dir)) {
             viewer_fit_view();
-            viewer_update_title();
-        } else if (browser_is_open()) {
-            browser_handle_key(key, mod);
+            need_title = true;
         }
         break;
-    default:
-        if (browser_is_open()) browser_handle_key(key, mod);
-        break;
     }
+    default: break;
+    }
+    if (need_title) viewer_update_title();
 }
 
 /**
@@ -247,51 +206,53 @@ static void handle_keydown(SDL_Keycode key, SDL_Keymod mod, bool *running) {
  */
 static void app_set_window_icon(SDL_Window *win) {
     if (!win) return;
-
-    int w = 0, h = 0, channels = 0;
-    unsigned char *pixels = stbi_load_from_memory(
-        g_app_icon_png, (int)g_app_icon_png_len, &w, &h, &channels, 4);
-    if (!pixels) {
-        fprintf(stderr, "Warning: Failed to decode embedded window icon: %s\n",
-            stbi_failure_reason());
+    int w = 0, h = 0, ch = 0;
+    unsigned char *pix = stbi_load_from_memory(g_app_icon_png, (int)g_app_icon_png_len, &w, &h, &ch, 4);
+    if (!pix) {
+        fprintf(stderr, "Warning: Failed to decode embedded window icon: %s\n", stbi_failure_reason());
         return;
     }
-
-    SDL_Surface *icon_surf = SDL_CreateRGBSurfaceWithFormatFrom(
-        pixels, w, h, 32, w * 4, SDL_PIXELFORMAT_RGBA32);
-    if (icon_surf) {
-        SDL_SetWindowIcon(win, icon_surf);
-        SDL_FreeSurface(icon_surf);
+    SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(pix, w, h, 32, w * 4, SDL_PIXELFORMAT_RGBA32);
+    if (surf) {
+        SDL_SetWindowIcon(win, surf);
+        SDL_FreeSurface(surf);
     } else {
-        fprintf(stderr, "Warning: Failed to create surface for window icon: %s\n",
-            SDL_GetError());
+        fprintf(stderr, "Warning: Failed to create surface for window icon: %s\n", SDL_GetError());
     }
+    stbi_image_free(pix);
+}
 
-    stbi_image_free(pixels);
+/**
+ * Free all global resources, close browser and viewer allocations, and shut down SDL.
+ */
+static void app_cleanup(void) {
+    browser_cleanup();
+    viewer_free_file_list();
+    for (int i = 0; i < g_count; i++) viewer_unload_image(&g_img[i]);
+    if (g_ren) SDL_DestroyRenderer(g_ren);
+    if (g_win) SDL_DestroyWindow(g_win);
+    SDL_Quit();
 }
 
 int main(int argc, char *argv[]) {
-    if (argc >= 3 && strcmp(argv[1], "--dump-icon") == 0) {
+    if (argc >= 2 && strcmp(argv[1], "--dump-icon") == 0) {
+        if (argc < 3) {
+            fprintf(stderr, "Error: --dump-icon requires an output path\n");
+            print_usage(argv[0]);
+            return 1;
+        }
         FILE *fp = fopen(argv[2], "wb");
         if (!fp) {
             perror("fopen");
             return 1;
         }
-        if (fwrite(g_app_icon_png, 1, g_app_icon_png_len, fp) != g_app_icon_png_len) {
-            fprintf(stderr, "Error: Failed to write icon data to %s\n", argv[2]);
-            fclose(fp);
-            return 1;
-        }
-        if (fclose(fp) != 0) {
-            perror("fclose");
+        bool ok = (fwrite(g_app_icon_png, 1, g_app_icon_png_len, fp) == g_app_icon_png_len);
+        if (!ok) fprintf(stderr, "Error: Failed to write icon data to %s\n", argv[2]);
+        if (fclose(fp) != 0 || !ok) {
+            if (ok) perror("fclose");
             return 1;
         }
         return 0;
-    }
-    if (argc == 2 && strcmp(argv[1], "--dump-icon") == 0) {
-        fprintf(stderr, "Error: --dump-icon requires an output path\n");
-        print_usage(argv[0]);
-        return 1;
     }
 
     // Validate argument count: 1 or 2 images. No flag parsing to keep CLI minimal.
@@ -312,11 +273,9 @@ int main(int argc, char *argv[]) {
     }
 
     // Create resizable window with HiDPI support.
-    g_win = SDL_CreateWindow(
-        "c-image-viewer",
+    g_win = SDL_CreateWindow("c-image-viewer",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        g_win_w, g_win_h,
-        SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+        g_win_w, g_win_h, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!g_win) {
         fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
         SDL_Quit();
@@ -326,27 +285,22 @@ int main(int argc, char *argv[]) {
     app_set_window_icon(g_win);
 
     // Prefer accelerated renderer with vsync; fall back to software.
-    g_ren = SDL_CreateRenderer(g_win, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
     if (!g_ren) g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_SOFTWARE);
     if (!g_ren) {
         fprintf(stderr, "SDL_CreateRenderer: %s\n", SDL_GetError());
-        SDL_DestroyWindow(g_win);
-        SDL_Quit();
+        app_cleanup();
         return 1;
     }
     SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_BLEND);
 
     // Load initial images; failure is fatal to avoid partial comparison.
     for (int i = 0; i < g_count; i++) {
-        char clean_path[PATH_MAX];
-        if (!viewer_validate_image_path(argv[i + 1], clean_path, sizeof(clean_path)) ||
-            !viewer_load_image(clean_path, &g_img[i])) {
+        char clean[PATH_MAX];
+        if (!viewer_validate_image_path(argv[i + 1], clean, sizeof(clean)) ||
+            !viewer_load_image(clean, &g_img[i])) {
             fprintf(stderr, "Error: Failed to load image: %s\n", argv[i + 1]);
-            for (int j = 0; j < i; j++) viewer_unload_image(&g_img[j]);
-            SDL_DestroyRenderer(g_ren);
-            SDL_DestroyWindow(g_win);
-            SDL_Quit();
+            app_cleanup();
             return 1;
         }
     }
@@ -360,21 +314,20 @@ int main(int argc, char *argv[]) {
 
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
 
-    bool dragging = false;
+    bool dragging = false, running = true;
     int last_x = 0, last_y = 0;
-    bool running = true;
 
     while (running) {
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
-            // Let browser handle events first when open.
+            // Browser overlay intercepts keyboard and mouse events when active.
             if (browser_is_open()) {
                 if (ev.type == SDL_KEYDOWN) {
                     if (browser_handle_key(ev.key.keysym.sym, ev.key.keysym.mod)) continue;
                     // ESC and q are handled by browser, but q should still quit even with browser open.
                     if (ev.key.keysym.sym == SDLK_q) { running = false; continue; }
-                }
-                if (ev.type == SDL_MOUSEBUTTONDOWN || ev.type == SDL_MOUSEWHEEL || ev.type == SDL_MOUSEMOTION) {
+                } else if (ev.type == SDL_MOUSEBUTTONDOWN || ev.type == SDL_MOUSEWHEEL ||
+                           ev.type == SDL_MOUSEMOTION) {
                     if (browser_handle_event(&ev)) continue;
                 }
             }
@@ -384,12 +337,11 @@ int main(int argc, char *argv[]) {
                 running = false;
                 break;
             case SDL_WINDOWEVENT:
-                if (ev.window.event == SDL_WINDOWEVENT_RESIZED ||
-                    ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                    if (ev.window.data1 > 0 && ev.window.data2 > 0) {
-                        g_win_w = ev.window.data1;
-                        g_win_h = ev.window.data2;
-                    }
+                if ((ev.window.event == SDL_WINDOWEVENT_RESIZED ||
+                     ev.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) &&
+                    ev.window.data1 > 0 && ev.window.data2 > 0) {
+                    g_win_w = ev.window.data1;
+                    g_win_h = ev.window.data2;
                 }
                 break;
             case SDL_DROPFILE:
@@ -411,27 +363,20 @@ int main(int argc, char *argv[]) {
                 if (ev.button.button == SDL_BUTTON_LEFT) dragging = false;
                 break;
             case SDL_MOUSEMOTION:
-                if (dragging && !browser_is_open()) {
-                    int dx = ev.motion.x - last_x;
-                    int dy = ev.motion.y - last_y;
-                    viewer_do_pan(dx, dy);
+                if (dragging) {
+                    viewer_do_pan(ev.motion.x - last_x, ev.motion.y - last_y);
                     viewer_update_title();
                     last_x = ev.motion.x;
                     last_y = ev.motion.y;
                 }
                 break;
             case SDL_MOUSEWHEEL: {
-                if (browser_is_open()) {
-                    browser_handle_event(&ev);
-                    break;
-                }
                 int mx, my;
                 SDL_GetMouseState(&mx, &my);
-                float factor = ev.wheel.y > 0 ? 1.1f : 0.9f;
-                if (ev.wheel.y > 1) factor = 1.0f + 0.1f * (float)ev.wheel.y;
-                if (ev.wheel.y < -1) factor = 1.0f + 0.1f * (float)ev.wheel.y;
-                if (factor < 0.2f) factor = 0.2f;
-                viewer_do_zoom(factor, mx, my);
+                float f = (ev.wheel.y > 1 || ev.wheel.y < -1) ? 1.0f + 0.1f * (float)ev.wheel.y
+                        : (ev.wheel.y > 0) ? 1.1f : 0.9f;
+                if (f < 0.2f) f = 0.2f;
+                viewer_do_zoom(f, mx, my);
                 viewer_update_title();
                 break;
             }
@@ -449,11 +394,6 @@ int main(int argc, char *argv[]) {
         SDL_Delay(16);
     }
 
-    browser_cleanup();
-    viewer_free_file_list();
-    for (int i = 0; i < g_count; i++) viewer_unload_image(&g_img[i]);
-    SDL_DestroyRenderer(g_ren);
-    SDL_DestroyWindow(g_win);
-    SDL_Quit();
+    app_cleanup();
     return 0;
 }
