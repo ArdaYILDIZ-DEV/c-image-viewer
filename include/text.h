@@ -47,7 +47,32 @@ void text_draw_char(SDL_Renderer *ren, int x, int y, char c, SDL_Color col, int 
 int text_glyph_spans(char c, int x, int y, int scale, SDL_Rect *out_rects);
 
 /**
- * Draw a NUL-terminated ASCII string left-to-right.
+ * Calculate the pixel width of a UTF-8 string at given scale.
+ *
+ * Counts decoded UTF-8 runes (each occupying 8 * scale pixels) rather than
+ * raw bytes, ensuring multi-byte characters do not inflate width metrics.
+ *
+ * @param text NUL-terminated UTF-8 string.
+ * @param scale Integer scaling factor (>= 1).
+ * @return Width in pixels (0 if text is NULL or scale <= 0).
+ */
+int text_width(const char *text, int scale);
+
+/**
+ * Decode next UTF-8 code point and map to an ASCII character.
+ *
+ * Advances *p past the decoded UTF-8 sequence. Validates continuation bytes
+ * defensively without buffer overruns. Common Latin and Turkish accented
+ * characters are mapped to ASCII base letters; unrepresented or invalid runes
+ * map to '?'. Returns '\0' when *p is NULL or points to '\0'.
+ *
+ * @param p Pointer to string pointer; advanced upon return.
+ * @return Mapped ASCII character, or '\0' at end of string.
+ */
+char utf8_next_rune(const char **p);
+
+/**
+ * Draw a NUL-terminated UTF-8 string left-to-right.
  *
  * Batches glyph spans across characters into an internal chunk buffer (up to 256 rects)
  * and sets renderer draw color once per string, significantly reducing GPU draw calls.
@@ -55,7 +80,7 @@ int text_glyph_spans(char c, int x, int y, int scale, SDL_Rect *out_rects);
  * @param ren Target SDL renderer.
  * @param x Origin X coordinate in pixels.
  * @param y Origin Y coordinate in pixels.
- * @param text NUL-terminated ASCII string.
+ * @param text NUL-terminated UTF-8 string.
  * @param col Foreground color.
  * @param scale Integer scaling factor (>= 1).
  * @return X coordinate after the last character, suitable for cursor chaining.
@@ -63,7 +88,7 @@ int text_glyph_spans(char c, int x, int y, int scale, SDL_Rect *out_rects);
 int text_draw(SDL_Renderer *ren, int x, int y, const char *text, SDL_Color col, int scale);
 
 /**
- * Draw a NUL-terminated ASCII string with clipping to a maximum pixel width.
+ * Draw a NUL-terminated UTF-8 string with clipping to a maximum pixel width.
  *
  * Emits characters until the next glyph would exceed max_width pixels from x.
  * Used for info bars, status lines, and overlays where text must not overflow.
@@ -71,7 +96,7 @@ int text_draw(SDL_Renderer *ren, int x, int y, const char *text, SDL_Color col, 
  * @param ren Target SDL renderer.
  * @param x Origin X coordinate in pixels.
  * @param y Origin Y coordinate in pixels.
- * @param text NUL-terminated ASCII string.
+ * @param text NUL-terminated UTF-8 string.
  * @param col Foreground color.
  * @param scale Integer scaling factor (>= 1).
  * @param max_width Maximum allowable pixel width (<= 0 draws nothing).
