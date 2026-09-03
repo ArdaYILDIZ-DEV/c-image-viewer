@@ -4,3 +4,4 @@ test_runner
 *.o
 *.ppm
 .DS_Store
+/docs/*.jpg
