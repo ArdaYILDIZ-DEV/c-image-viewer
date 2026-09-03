@@ -5,3 +5,5 @@ test_runner
 *.ppm
 .DS_Store
 /docs/*.jpg
+.brain/
+.brain

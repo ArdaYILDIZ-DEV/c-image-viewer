@@ -17,12 +17,15 @@
 #include "viewer.h"
 #include "browser.h"
 #include "clipboard.h"
+#include "icon_data.h"
+#include "stb_image.h"
 
 #include <SDL2/SDL.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <string.h>
 
 /**
  * Print command-line usage information to stderr.
@@ -32,8 +35,10 @@
 static void print_usage(const char *prog) {
     fprintf(stderr,
         "Usage: %s <image1> [image2]\n"
+        "       %s --dump-icon <output.png>\n"
         "  Single image -> full window\n"
         "  Two images   -> side-by-side, synchronized zoom/pan\n"
+        "  --dump-icon  -> write embedded application icon to file and exit\n"
         "\n"
         "Controls:\n"
         "  Mouse wheel        Zoom (cursor-centered)\n"
@@ -55,7 +60,7 @@ static void print_usage(const char *prog) {
         "  ESC                Browser / Exit fullscreen / Close help / Close metadata\n"
         "  q                  Quit\n"
         "  Drag & drop        Drop file onto pane to replace it\n",
-        prog);
+        prog, prog);
 }
 
 /**
@@ -231,7 +236,64 @@ static void handle_keydown(SDL_Keycode key, SDL_Keymod mod, bool *running) {
     }
 }
 
+/**
+ * Load embedded application icon and assign it to the window.
+ *
+ * Decodes the in-memory 64x64 RGBA PNG icon using stb_image, constructs an
+ * SDL surface wrapping the decoded pixel buffer, assigns it to the window via
+ * SDL_SetWindowIcon, and frees both the surface and stb_image pixel buffer.
+ *
+ * @param win Target SDL window receiving the application icon.
+ */
+static void app_set_window_icon(SDL_Window *win) {
+    if (!win) return;
+
+    int w = 0, h = 0, channels = 0;
+    unsigned char *pixels = stbi_load_from_memory(
+        g_app_icon_png, (int)g_app_icon_png_len, &w, &h, &channels, 4);
+    if (!pixels) {
+        fprintf(stderr, "Warning: Failed to decode embedded window icon: %s\n",
+            stbi_failure_reason());
+        return;
+    }
+
+    SDL_Surface *icon_surf = SDL_CreateRGBSurfaceWithFormatFrom(
+        pixels, w, h, 32, w * 4, SDL_PIXELFORMAT_RGBA32);
+    if (icon_surf) {
+        SDL_SetWindowIcon(win, icon_surf);
+        SDL_FreeSurface(icon_surf);
+    } else {
+        fprintf(stderr, "Warning: Failed to create surface for window icon: %s\n",
+            SDL_GetError());
+    }
+
+    stbi_image_free(pixels);
+}
+
 int main(int argc, char *argv[]) {
+    if (argc >= 3 && strcmp(argv[1], "--dump-icon") == 0) {
+        FILE *fp = fopen(argv[2], "wb");
+        if (!fp) {
+            perror("fopen");
+            return 1;
+        }
+        if (fwrite(g_app_icon_png, 1, g_app_icon_png_len, fp) != g_app_icon_png_len) {
+            fprintf(stderr, "Error: Failed to write icon data to %s\n", argv[2]);
+            fclose(fp);
+            return 1;
+        }
+        if (fclose(fp) != 0) {
+            perror("fclose");
+            return 1;
+        }
+        return 0;
+    }
+    if (argc == 2 && strcmp(argv[1], "--dump-icon") == 0) {
+        fprintf(stderr, "Error: --dump-icon requires an output path\n");
+        print_usage(argv[0]);
+        return 1;
+    }
+
     // Validate argument count: 1 or 2 images. No flag parsing to keep CLI minimal.
     if (argc < 2 || argc > 3) {
         print_usage(argv[0]);
@@ -256,6 +318,8 @@ int main(int argc, char *argv[]) {
         SDL_Quit();
         return 1;
     }
+
+    app_set_window_icon(g_win);
 
     // Prefer accelerated renderer with vsync; fall back to software.
     g_ren = SDL_CreateRenderer(g_win, -1,
