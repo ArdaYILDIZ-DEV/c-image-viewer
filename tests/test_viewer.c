@@ -642,10 +642,287 @@ static void test_viewer_culling_and_metadata_render(void) {
     unlink(tmp);
 }
 
+static void test_viewer_distribute_dual_budget(void) {
+    int out0 = -1, out1 = -1;
+
+    // 1. Equal splits when both filenames exceed or match their share
+    viewer_distribute_dual_budget(36, 20, 20, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 18);
+    TEST_ASSERT_INT_EQ(out1, 18);
+    TEST_ASSERT_INT_EQ(out0 + out1, 36);
+
+    viewer_distribute_dual_budget(36, 18, 18, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 18);
+    TEST_ASSERT_INT_EQ(out1, 18);
+
+    // Odd total budget split
+    viewer_distribute_dual_budget(35, 20, 20, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 17);
+    TEST_ASSERT_INT_EQ(out1, 18);
+    TEST_ASSERT_INT_EQ(out0 + out1, 35);
+
+    // 2. Asymmetric surplus donation
+    // Pane 0 needs less (10 < 18), surplus of 8 donated to Pane 1
+    viewer_distribute_dual_budget(36, 10, 30, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 10);
+    TEST_ASSERT_INT_EQ(out1, 26);
+    TEST_ASSERT_INT_EQ(out0 + out1, 36);
+
+    // Pane 1 needs less (10 < 18), surplus of 8 donated to Pane 0
+    viewer_distribute_dual_budget(36, 30, 10, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 26);
+    TEST_ASSERT_INT_EQ(out1, 10);
+    TEST_ASSERT_INT_EQ(out0 + out1, 36);
+
+    // Both need less than their share: equal split preserved
+    viewer_distribute_dual_budget(40, 5, 8, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 20);
+    TEST_ASSERT_INT_EQ(out1, 20);
+    TEST_ASSERT_INT_EQ(out0 + out1, 40);
+
+    // 3. Conservation invariant across a range of values and odd/even budgets
+    for (int total = 0; total <= 100; total++) {
+        for (int l0 = 0; l0 <= 40; l0 += 10) {
+            for (int l1 = 0; l1 <= 40; l1 += 10) {
+                viewer_distribute_dual_budget(total, l0, l1, 8, &out0, &out1);
+                TEST_ASSERT_INT_EQ(out0 + out1, total);
+                TEST_ASSERT(out0 >= 0);
+                TEST_ASSERT(out1 >= 0);
+            }
+        }
+    }
+
+    // 4. Small total budgets
+    viewer_distribute_dual_budget(5, 10, 10, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 2);
+    TEST_ASSERT_INT_EQ(out1, 3);
+    TEST_ASSERT_INT_EQ(out0 + out1, 5);
+
+    viewer_distribute_dual_budget(1, 10, 10, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 0);
+    TEST_ASSERT_INT_EQ(out1, 1);
+    TEST_ASSERT_INT_EQ(out0 + out1, 1);
+
+    // Small total budget with surplus donation
+    viewer_distribute_dual_budget(6, 1, 10, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 1);
+    TEST_ASSERT_INT_EQ(out1, 5);
+    TEST_ASSERT_INT_EQ(out0 + out1, 6);
+
+    // 5. Zero and negative budgets
+    out0 = 99; out1 = 99;
+    viewer_distribute_dual_budget(0, 10, 10, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 0);
+    TEST_ASSERT_INT_EQ(out1, 0);
+
+    out0 = 99; out1 = 99;
+    viewer_distribute_dual_budget(-10, 10, 10, 8, &out0, &out1);
+    TEST_ASSERT_INT_EQ(out0, 0);
+    TEST_ASSERT_INT_EQ(out1, 0);
+
+    // 6. NULL safety
+    viewer_distribute_dual_budget(36, 10, 10, 8, NULL, &out1);
+    viewer_distribute_dual_budget(36, 10, 10, 8, &out0, NULL);
+    viewer_distribute_dual_budget(36, 10, 10, 8, NULL, NULL);
+}
+
+static void test_viewer_calc_status_layout_single(void) {
+    const char *name = "long_exposure_landscape_photograph.jpg";
+    int img_w = 1920, img_h = 1080, zoom = 100, idx = 1, count = 10;
+    bool sync = true;
+
+    // Window width 1920 -> FULL hints
+    ViewerStatusBarLayout l1920 = viewer_calc_status_layout_single(
+        1920, name, img_w, img_h, zoom, sync, idx, count);
+    TEST_ASSERT_INT_EQ(l1920.hint_tier, VIEWER_HINT_FULL);
+    TEST_ASSERT(l1920.name_budget[0] >= VIEWER_INFO_NAME_TARGET_SINGLE);
+    // Verify budget expansion on wide screens
+    TEST_ASSERT(l1920.name_budget[0] > 100);
+
+    // Window width 1024 -> FULL hints
+    ViewerStatusBarLayout l1024 = viewer_calc_status_layout_single(
+        1024, name, img_w, img_h, zoom, sync, idx, count);
+    TEST_ASSERT_INT_EQ(l1024.hint_tier, VIEWER_HINT_FULL);
+    TEST_ASSERT(l1024.name_budget[0] >= VIEWER_INFO_NAME_TARGET_SINGLE);
+
+    // Window width 800 -> COMPACT hints
+    ViewerStatusBarLayout l800 = viewer_calc_status_layout_single(
+        800, name, img_w, img_h, zoom, sync, idx, count);
+    TEST_ASSERT_INT_EQ(l800.hint_tier, VIEWER_HINT_COMPACT);
+    TEST_ASSERT(l800.name_budget[0] >= VIEWER_INFO_NAME_TARGET_SINGLE);
+
+    // Window width 640 -> MINIMAL hints
+    ViewerStatusBarLayout l640 = viewer_calc_status_layout_single(
+        640, name, img_w, img_h, zoom, sync, idx, count);
+    TEST_ASSERT_INT_EQ(l640.hint_tier, VIEWER_HINT_MINIMAL);
+    TEST_ASSERT(l640.name_budget[0] >= VIEWER_INFO_NAME_TARGET_SINGLE);
+
+    // Window width 400 -> NONE hints
+    ViewerStatusBarLayout l400 = viewer_calc_status_layout_single(
+        400, name, img_w, img_h, zoom, sync, idx, count);
+    TEST_ASSERT_INT_EQ(l400.hint_tier, VIEWER_HINT_NONE);
+
+    // Window width 300 -> NONE hints
+    ViewerStatusBarLayout l300 = viewer_calc_status_layout_single(
+        300, name, img_w, img_h, zoom, sync, idx, count);
+    TEST_ASSERT_INT_EQ(l300.hint_tier, VIEWER_HINT_NONE);
+
+    // Window width 0 -> NONE hints, clamped to 0
+    ViewerStatusBarLayout l0 = viewer_calc_status_layout_single(
+        0, name, img_w, img_h, zoom, sync, idx, count);
+    TEST_ASSERT_INT_EQ(l0.hint_tier, VIEWER_HINT_NONE);
+    TEST_ASSERT_INT_EQ(l0.usable_chars, 0);
+    TEST_ASSERT_INT_EQ(l0.name_budget[0], 0);
+
+    // Verify clamped total length <= usable_chars for all tested widths
+    int widths[] = {1920, 1024, 800, 640, 400, 300, 0};
+    for (size_t i = 0; i < sizeof(widths)/sizeof(widths[0]); i++) {
+        int w = widths[i];
+        ViewerStatusBarLayout layout = viewer_calc_status_layout_single(
+            w, name, img_w, img_h, zoom, sync, idx, count);
+        char buf[512];
+        int len = viewer_format_status_single(&layout, name, img_w, img_h, zoom, sync, idx, count, buf, sizeof(buf));
+        int clamped_len = (len > layout.usable_chars) ? layout.usable_chars : len;
+        TEST_ASSERT(clamped_len <= layout.usable_chars);
+        if (layout.usable_chars >= 30) {
+            TEST_ASSERT(len <= layout.usable_chars);
+        }
+    }
+}
+
+static void test_viewer_calc_status_layout_dual(void) {
+    const char *name_short = "a.jpg";
+    const char *name_long = "panoramic_mountain_view_scenic_2026.png";
+    int w0 = 1920, h0 = 1080, w1 = 1280, h1 = 720;
+    int zoom = 100;
+    bool sync = true;
+    int active = 0;
+
+    // Test tier degradation across widths
+    ViewerStatusBarLayout l1920 = viewer_calc_status_layout_dual(
+        1920, name_short, w0, h0, name_long, w1, h1, zoom, sync, active);
+    TEST_ASSERT_INT_EQ(l1920.hint_tier, VIEWER_HINT_FULL);
+
+    ViewerStatusBarLayout l1024 = viewer_calc_status_layout_dual(
+        1024, name_short, w0, h0, name_long, w1, h1, zoom, sync, active);
+    TEST_ASSERT_INT_EQ(l1024.hint_tier, VIEWER_HINT_FULL);
+
+    ViewerStatusBarLayout l900 = viewer_calc_status_layout_dual(
+        900, name_short, w0, h0, name_long, w1, h1, zoom, sync, active);
+    TEST_ASSERT_INT_EQ(l900.hint_tier, VIEWER_HINT_COMPACT);
+
+    ViewerStatusBarLayout l800 = viewer_calc_status_layout_dual(
+        800, name_short, w0, h0, name_long, w1, h1, zoom, sync, active);
+    TEST_ASSERT_INT_EQ(l800.hint_tier, VIEWER_HINT_MINIMAL);
+
+    ViewerStatusBarLayout l640 = viewer_calc_status_layout_dual(
+        640, name_short, w0, h0, name_long, w1, h1, zoom, sync, active);
+    TEST_ASSERT_INT_EQ(l640.hint_tier, VIEWER_HINT_NONE);
+
+    ViewerStatusBarLayout l0 = viewer_calc_status_layout_dual(
+        0, name_short, w0, h0, name_long, w1, h1, zoom, sync, active);
+    TEST_ASSERT_INT_EQ(l0.hint_tier, VIEWER_HINT_NONE);
+    TEST_ASSERT_INT_EQ(l0.usable_chars, 0);
+    TEST_ASSERT_INT_EQ(l0.name_budget[0], 0);
+    TEST_ASSERT_INT_EQ(l0.name_budget[1], 0);
+
+    // Verify surplus sharing between short and long filenames:
+    // When pane 0 is short ("a.jpg", 5 chars) and pane 1 is long (39 chars)
+    ViewerStatusBarLayout l_share0 = viewer_calc_status_layout_dual(
+        800, name_short, w0, h0, name_long, w1, h1, zoom, sync, active);
+    // Pane 0 needs only 5 chars, so its budget should be 5
+    TEST_ASSERT_INT_EQ(l_share0.name_budget[0], 5);
+    // Pane 1 receives the surplus and gets more than half the total name budget
+    TEST_ASSERT(l_share0.name_budget[1] > l_share0.name_budget[0]);
+
+    // Reverse: pane 0 is long, pane 1 is short
+    ViewerStatusBarLayout l_share1 = viewer_calc_status_layout_dual(
+        800, name_long, w0, h0, name_short, w1, h1, zoom, sync, active);
+    TEST_ASSERT_INT_EQ(l_share1.name_budget[1], 5);
+    TEST_ASSERT(l_share1.name_budget[0] > l_share1.name_budget[1]);
+
+    // Verify clamped total length <= usable_chars across widths
+    int widths[] = {1920, 1024, 900, 800, 640, 400, 0};
+    for (size_t i = 0; i < sizeof(widths)/sizeof(widths[0]); i++) {
+        int w = widths[i];
+        ViewerStatusBarLayout layout = viewer_calc_status_layout_dual(
+            w, name_short, w0, h0, name_long, w1, h1, zoom, sync, active);
+        char buf[512];
+        int len = viewer_format_status_dual(
+            &layout, name_short, w0, h0, name_long, w1, h1, zoom, sync, active, buf, sizeof(buf));
+        int clamped_len = (len > layout.usable_chars) ? layout.usable_chars : len;
+        TEST_ASSERT(clamped_len <= layout.usable_chars);
+        if (layout.usable_chars >= 50) {
+            TEST_ASSERT(len <= layout.usable_chars);
+        }
+    }
+}
+
+static void test_viewer_format_status(void) {
+    // 1. Single pane status formatting with extension preservation
+    ViewerStatusBarLayout layout;
+    memset(&layout, 0, sizeof(layout));
+    layout.usable_chars = 120;
+    layout.hint_tier = VIEWER_HINT_MINIMAL;
+    layout.name_budget[0] = 18;
+
+    char buf[256];
+    int len = viewer_format_status_single(
+        &layout, "verylongfilenametest.jpg", 1920, 1080, 100, true, 3, 25, buf, sizeof(buf));
+    TEST_ASSERT(len > 0);
+    TEST_ASSERT_INT_EQ(len, (int)strlen(buf));
+    // Verify filename truncation preserves extension .jpg
+    TEST_ASSERT(strstr(buf, "...jpg") != NULL);
+    // Verify metadata formatted properly
+    TEST_ASSERT(strstr(buf, "1920x1080") != NULL);
+    TEST_ASSERT(strstr(buf, "100%") != NULL);
+    TEST_ASSERT(strstr(buf, "SYNC") != NULL);
+    TEST_ASSERT(strstr(buf, "3/25") != NULL);
+    // Verify minimal hint present
+    TEST_ASSERT(strstr(buf, "[e] exif [ESC]") != NULL);
+
+    // 2. Dual pane status formatting in FREE mode
+    layout.hint_tier = VIEWER_HINT_COMPACT;
+    layout.name_budget[0] = 12;
+    layout.name_budget[1] = 12;
+    len = viewer_format_status_dual(
+        &layout, "leftimage.png", 800, 600, "rightimage.png", 1024, 768, 150, false, 0, buf, sizeof(buf));
+    TEST_ASSERT(len > 0);
+    TEST_ASSERT_INT_EQ(len, (int)strlen(buf));
+    TEST_ASSERT(strstr(buf, "(800x600)") != NULL);
+    TEST_ASSERT(strstr(buf, "(1024x768)") != NULL);
+    TEST_ASSERT(strstr(buf, "FREE") != NULL);
+    TEST_ASSERT(strstr(buf, "[L*]") != NULL);
+    TEST_ASSERT(strstr(buf, "[s]ync [Tab] pane [e] exif") != NULL);
+
+    // Active pane 1 indicator
+    viewer_format_status_dual(
+        &layout, "leftimage.png", 800, 600, "rightimage.png", 1024, 768, 150, false, 1, buf, sizeof(buf));
+    TEST_ASSERT(strstr(buf, "[R*]") != NULL);
+
+    // 3. Small output buffer safety: truncation without buffer overrun
+    char small_buf[16];
+    len = viewer_format_status_single(
+        &layout, "image.jpg", 800, 600, 100, true, 1, 1, small_buf, sizeof(small_buf));
+    TEST_ASSERT(len < (int)sizeof(small_buf));
+    TEST_ASSERT_INT_EQ((int)strlen(small_buf), len);
+    TEST_ASSERT(small_buf[sizeof(small_buf) - 1] == '\0');
+
+    // 4. NULL / zero buffer edge cases
+    TEST_ASSERT_INT_EQ(viewer_format_status_single(&layout, "image.jpg", 800, 600, 100, true, 1, 1, NULL, 0), 0);
+    TEST_ASSERT_INT_EQ(viewer_format_status_single(NULL, "image.jpg", 800, 600, 100, true, 1, 1, buf, sizeof(buf)), 0);
+    TEST_ASSERT_INT_EQ(viewer_format_status_dual(&layout, "a.jpg", 800, 600, "b.jpg", 800, 600, 100, true, 0, NULL, 0), 0);
+    TEST_ASSERT_INT_EQ(viewer_format_status_dual(NULL, "a.jpg", 800, 600, "b.jpg", 800, 600, 100, true, 0, buf, sizeof(buf)), 0);
+}
+
 void run_viewer_tests(void) {
     printf("--- Viewer Test Suite ---\n");
     TEST_RUN(test_viewer_is_image_file);
     TEST_RUN(test_viewer_truncate_filename);
+    TEST_RUN(test_viewer_distribute_dual_budget);
+    TEST_RUN(test_viewer_calc_status_layout_single);
+    TEST_RUN(test_viewer_calc_status_layout_dual);
+    TEST_RUN(test_viewer_format_status);
     TEST_RUN(test_viewer_file_list_and_scan);
     TEST_RUN(test_viewer_load_unload);
     TEST_RUN(test_viewer_replace_and_bounds);

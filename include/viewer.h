@@ -24,9 +24,36 @@
 #define VIEWER_INFO_NAME_MAX 24
 #define VIEWER_INFO_DUAL_NAME_MAX 18
 
+#define VIEWER_INFO_MARGIN_X 6
+#define VIEWER_INFO_FONT_W 8
+#define VIEWER_INFO_NAME_MIN_SINGLE 12
+#define VIEWER_INFO_NAME_TARGET_SINGLE 32
+#define VIEWER_INFO_NAME_MIN_DUAL 8
+#define VIEWER_INFO_NAME_TARGET_DUAL 18
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/**
+ * Status bar hint tiers, degraded responsively based on available horizontal budget.
+ */
+typedef enum {
+    VIEWER_HINT_NONE = 0,
+    VIEWER_HINT_MINIMAL,
+    VIEWER_HINT_COMPACT,
+    VIEWER_HINT_FULL,
+    VIEWER_HINT_TIER_COUNT
+} ViewerHintTier;
+
+/**
+ * Calculated status bar character budget and responsive hint tier.
+ */
+typedef struct {
+    int usable_chars;
+    ViewerHintTier hint_tier;
+    int name_budget[2];
+} ViewerStatusBarLayout;
 
 /**
  * Single loaded image and its GPU texture.
@@ -274,6 +301,123 @@ void viewer_render(SDL_Renderer *ren);
  * @param ren Target SDL renderer.
  */
 void viewer_render_info_bar(SDL_Renderer *ren);
+
+// ---------------------------------------------------------------------------
+// Status bar layout and formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * Distribute available filename character budget between dual panes.
+ *
+ * Divides total_budget equally between pane 0 and pane 1. If either pane needs
+ * fewer characters than its share, the surplus is transferred to the other pane.
+ * Preserves the conservation invariant: *out0 + *out1 == total_budget (when total_budget >= 0).
+ *
+ * @param total_budget Total character budget available for both filenames.
+ * @param len0 Required character count for pane 0 filename.
+ * @param len1 Required character count for pane 1 filename.
+ * @param min_len Minimum character allocation per pane.
+ * @param out0 Output pointer for pane 0 character budget.
+ * @param out1 Output pointer for pane 1 character budget.
+ */
+void viewer_distribute_dual_budget(int total_budget, int len0, int len1, int min_len, int *out0, int *out1);
+
+/**
+ * Calculate dynamic status bar layout for single-pane view based on window width.
+ *
+ * Computes usable character capacity from window width, measures fixed metadata width,
+ * and selects the highest responsive hint tier (FULL down to NONE) that leaves at least
+ * VIEWER_INFO_NAME_TARGET_SINGLE characters for the filename. Allocates all remaining
+ * usable character budget to layout.name_budget[0].
+ *
+ * @param win_w Window width in pixels.
+ * @param name Filename or path for image.
+ * @param img_w Image pixel width.
+ * @param img_h Image pixel height.
+ * @param zoom_pct Zoom level percentage (e.g. 100).
+ * @param is_sync True if sync transform mode is active.
+ * @param file_idx Current image index in folder.
+ * @param file_count Total image count in folder.
+ * @return Calculated ViewerStatusBarLayout struct.
+ */
+ViewerStatusBarLayout viewer_calc_status_layout_single(
+    int win_w, const char *name, int img_w, int img_h,
+    int zoom_pct, bool is_sync, int file_idx, int file_count);
+
+/**
+ * Calculate dynamic status bar layout for dual-pane view based on window width.
+ *
+ * Computes usable character capacity from window width, measures fixed metadata for
+ * both panes, selects the highest responsive hint tier that leaves sufficient filename
+ * budget, and distributes remaining character budget between pane 0 and pane 1 using
+ * viewer_distribute_dual_budget.
+ *
+ * @param win_w Window width in pixels.
+ * @param name0 Filename or path for pane 0 image.
+ * @param img0_w Pixel width of pane 0 image.
+ * @param img0_h Pixel height of pane 0 image.
+ * @param name1 Filename or path for pane 1 image.
+ * @param img1_w Pixel width of pane 1 image.
+ * @param img1_h Pixel height of pane 1 image.
+ * @param zoom_pct Zoom level percentage.
+ * @param is_sync True if sync transform mode is active.
+ * @param active_pane Active pane index in free mode (0 or 1).
+ * @return Calculated ViewerStatusBarLayout struct.
+ */
+ViewerStatusBarLayout viewer_calc_status_layout_dual(
+    int win_w, const char *name0, int img0_w, int img0_h,
+    const char *name1, int img1_w, int img1_h,
+    int zoom_pct, bool is_sync, int active_pane);
+
+/**
+ * Format complete single-pane status bar string according to calculated layout.
+ *
+ * Truncates filename with extension preservation to layout->name_budget[0], formats
+ * metadata and responsive hint text, and ensures NUL termination.
+ *
+ * @param layout Layout specifying budget and hint tier.
+ * @param name Filename or path for image.
+ * @param img_w Image pixel width.
+ * @param img_h Image pixel height.
+ * @param zoom_pct Zoom level percentage.
+ * @param is_sync True if sync mode is active.
+ * @param file_idx Current image index.
+ * @param file_count Total image count.
+ * @param out_buf Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ * @return Number of characters written (excluding NUL).
+ */
+int viewer_format_status_single(
+    const ViewerStatusBarLayout *layout, const char *name,
+    int img_w, int img_h, int zoom_pct, bool is_sync,
+    int file_idx, int file_count, char *out_buf, size_t out_sz);
+
+/**
+ * Format complete dual-pane status bar string according to calculated layout.
+ *
+ * Truncates filenames using layout->name_budget[0] and layout->name_budget[1], formats
+ * metadata for both panes, active pane indicator, and responsive hint text, and ensures
+ * NUL termination.
+ *
+ * @param layout Layout specifying budgets and hint tier.
+ * @param name0 Filename or path for pane 0.
+ * @param img0_w Pixel width of pane 0 image.
+ * @param img0_h Pixel height of pane 0 image.
+ * @param name1 Filename or path for pane 1.
+ * @param img1_w Pixel width of pane 1 image.
+ * @param img1_h Pixel height of pane 1 image.
+ * @param zoom_pct Zoom level percentage.
+ * @param is_sync True if sync mode is active.
+ * @param active_pane Active pane index (0 or 1).
+ * @param out_buf Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ * @return Number of characters written (excluding NUL).
+ */
+int viewer_format_status_dual(
+    const ViewerStatusBarLayout *layout, const char *name0,
+    int img0_w, int img0_h, const char *name1,
+    int img1_w, int img1_h, int zoom_pct, bool is_sync,
+    int active_pane, char *out_buf, size_t out_sz);
 
 /**
  * Render keyboard shortcut and controls help overlay dialog.

@@ -750,6 +750,314 @@ bool viewer_go_parent(void) {
 // Rendering helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Status bar layout and formatting helpers
+// ---------------------------------------------------------------------------
+
+static const char *s_hint_single[VIEWER_HINT_TIER_COUNT] = {
+    "",                                                                   // VIEWER_HINT_NONE
+    "[e] exif [ESC]",                                                     // VIEWER_HINT_MINIMAL
+    "[s]ync [f]ull [n/p] [e]xif [ESC]",                                   // VIEWER_HINT_COMPACT
+    "[s]ync [Tab] pane [f]ull [n/p] next/prev [e] exif [ESC] browser"     // VIEWER_HINT_FULL
+};
+
+static const char *s_hint_dual[VIEWER_HINT_TIER_COUNT] = {
+    "",                                                                   // VIEWER_HINT_NONE
+    "[e] exif",                                                           // VIEWER_HINT_MINIMAL
+    "[s]ync [Tab] pane [e] exif",                                         // VIEWER_HINT_COMPACT
+    "[s]ync [Tab] pane [f]ull [e] exif [ESC] browser"                     // VIEWER_HINT_FULL
+};
+
+/**
+ * Distribute available filename character budget between dual panes.
+ *
+ * Starts with an equal division of total_budget. If either pane needs fewer
+ * characters than its initial share (len < share), the surplus is transferred to
+ * the other pane. Ensures conservation of the total budget (*out0 + *out1 == total_budget)
+ * for non-negative budgets, and zeroes outputs when total_budget <= 0.
+ *
+ * @param total_budget Total character budget available for both filenames.
+ * @param len0 Required character count for pane 0 filename.
+ * @param len1 Required character count for pane 1 filename.
+ * @param min_len Minimum character allocation per pane (reserved/floor parameter).
+ * @param out0 Output pointer for pane 0 character budget.
+ * @param out1 Output pointer for pane 1 character budget.
+ */
+void viewer_distribute_dual_budget(int total_budget, int len0, int len1, int min_len, int *out0, int *out1) {
+    if (!out0 || !out1) return;
+    if (total_budget <= 0) {
+        *out0 = 0;
+        *out1 = 0;
+        return;
+    }
+    (void)min_len;
+    int b0 = total_budget / 2;
+    int b1 = total_budget - b0;
+
+    int n0 = (len0 < 0) ? 0 : len0;
+    int n1 = (len1 < 0) ? 0 : len1;
+
+    if (n0 < b0 && n1 >= b1) {
+        int surplus = b0 - n0;
+        b0 = n0;
+        b1 += surplus;
+    } else if (n1 < b1 && n0 >= b0) {
+        int surplus = b1 - n1;
+        b1 = n1;
+        b0 += surplus;
+    }
+    *out0 = b0;
+    *out1 = b1;
+}
+
+/**
+ * Calculate dynamic status bar layout for single-pane view based on window width.
+ *
+ * Computes usable characters: (win_w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W.
+ * Formats metadata string ("%dx%d  %d%%  %s  %d/%d") and evaluates hint tiers from
+ * FULL down to NONE. If available budget allows the target filename budget
+ * (VIEWER_INFO_NAME_TARGET_SINGLE), that tier is selected. All remaining usable
+ * characters are allocated to layout.name_budget[0].
+ *
+ * @param win_w Window width in pixels.
+ * @param name Filename or path string for image.
+ * @param img_w Image pixel width.
+ * @param img_h Image pixel height.
+ * @param zoom_pct Zoom factor percentage (e.g. 100).
+ * @param is_sync True if sync transform mode is active.
+ * @param file_idx Current image index in folder.
+ * @param file_count Total number of images in folder.
+ * @return Calculated ViewerStatusBarLayout struct.
+ */
+ViewerStatusBarLayout viewer_calc_status_layout_single(
+    int win_w, const char *name, int img_w, int img_h,
+    int zoom_pct, bool is_sync, int file_idx, int file_count)
+{
+    (void)name;
+    ViewerStatusBarLayout layout;
+    memset(&layout, 0, sizeof(layout));
+
+    int usable_chars = (win_w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W;
+    if (usable_chars < 0) usable_chars = 0;
+    layout.usable_chars = usable_chars;
+
+    char meta[256];
+    int meta_len = snprintf(meta, sizeof(meta), "%dx%d  %d%%  %s  %d/%d",
+        img_w, img_h, zoom_pct, is_sync ? "SYNC" : "FREE", file_idx, file_count);
+    if (meta_len < 0) meta_len = 0;
+
+    for (int t = (int)VIEWER_HINT_FULL; t >= (int)VIEWER_HINT_NONE; t--) {
+        const char *hint = s_hint_single[t];
+        int hint_len = (int)strlen(hint);
+        int hint_cost = (hint_len > 0) ? (2 + hint_len) : 0;
+        int cost = 2 + meta_len + hint_cost;
+        int rem = usable_chars - cost;
+
+        if (t == (int)VIEWER_HINT_NONE || rem >= VIEWER_INFO_NAME_TARGET_SINGLE) {
+            layout.hint_tier = (ViewerHintTier)t;
+            layout.name_budget[0] = (rem < 0) ? 0 : rem;
+            layout.name_budget[1] = 0;
+            return layout;
+        }
+    }
+
+    layout.hint_tier = VIEWER_HINT_NONE;
+    int base_cost = 2 + meta_len;
+    int rem = usable_chars - base_cost;
+    layout.name_budget[0] = (rem < 0) ? 0 : rem;
+    layout.name_budget[1] = 0;
+    return layout;
+}
+
+/**
+ * Calculate dynamic status bar layout for dual-pane view based on window width.
+ *
+ * Computes usable characters from window width, measures fixed metadata length for
+ * both panes, evaluates hint tiers from FULL down to NONE against the combined target
+ * budget (2 * VIEWER_INFO_NAME_TARGET_DUAL), and distributes remaining character
+ * budget between name0 and name1 using viewer_distribute_dual_budget.
+ *
+ * @param win_w Window width in pixels.
+ * @param name0 Filename or path for pane 0.
+ * @param img0_w Pixel width of pane 0 image.
+ * @param img0_h Pixel height of pane 0 image.
+ * @param name1 Filename or path for pane 1.
+ * @param img1_w Pixel width of pane 1 image.
+ * @param img1_h Pixel height of pane 1 image.
+ * @param zoom_pct Zoom factor percentage.
+ * @param is_sync True if sync transform mode is active.
+ * @param active_pane Active pane index (0 or 1).
+ * @return Calculated ViewerStatusBarLayout struct.
+ */
+ViewerStatusBarLayout viewer_calc_status_layout_dual(
+    int win_w, const char *name0, int img0_w, int img0_h,
+    const char *name1, int img1_w, int img1_h,
+    int zoom_pct, bool is_sync, int active_pane)
+{
+    ViewerStatusBarLayout layout;
+    memset(&layout, 0, sizeof(layout));
+
+    int usable_chars = (win_w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W;
+    if (usable_chars < 0) usable_chars = 0;
+    layout.usable_chars = usable_chars;
+
+    char p0_buf[128];
+    char p1_buf[128];
+    const char *pane_ind = is_sync ? "" : (active_pane == 0 ? " [L*]" : " [R*]");
+    int p0_len = snprintf(p0_buf, sizeof(p0_buf), " (%dx%d) | ", img0_w, img0_h);
+    int p1_len = snprintf(p1_buf, sizeof(p1_buf), " (%dx%d)  %d%%  %s%s",
+        img1_w, img1_h, zoom_pct, is_sync ? "SYNC" : "FREE", pane_ind);
+    if (p0_len < 0) p0_len = 0;
+    if (p1_len < 0) p1_len = 0;
+    int fixed_meta_len = p0_len + p1_len;
+
+    const char *b0 = name0 ? strrchr(name0, '/') : NULL;
+    const char *fname0 = b0 ? b0 + 1 : (name0 ? name0 : "");
+    const char *b1 = name1 ? strrchr(name1, '/') : NULL;
+    const char *fname1 = b1 ? b1 + 1 : (name1 ? name1 : "");
+    int len0 = (int)strlen(fname0);
+    int len1 = (int)strlen(fname1);
+
+    int target_dual = 2 * VIEWER_INFO_NAME_TARGET_DUAL;
+
+    for (int t = (int)VIEWER_HINT_FULL; t >= (int)VIEWER_HINT_NONE; t--) {
+        const char *hint = s_hint_dual[t];
+        int hint_len = (int)strlen(hint);
+        int hint_cost = (hint_len > 0) ? (2 + hint_len) : 0;
+        int cost = fixed_meta_len + hint_cost;
+        int rem = usable_chars - cost;
+
+        if (t == (int)VIEWER_HINT_NONE || rem >= target_dual) {
+            layout.hint_tier = (ViewerHintTier)t;
+            int total_name_budget = (rem < 0) ? 0 : rem;
+            viewer_distribute_dual_budget(total_name_budget, len0, len1,
+                VIEWER_INFO_NAME_MIN_DUAL, &layout.name_budget[0], &layout.name_budget[1]);
+            return layout;
+        }
+    }
+
+    layout.hint_tier = VIEWER_HINT_NONE;
+    int rem = usable_chars - fixed_meta_len;
+    int total_name_budget = (rem < 0) ? 0 : rem;
+    viewer_distribute_dual_budget(total_name_budget, len0, len1,
+        VIEWER_INFO_NAME_MIN_DUAL, &layout.name_budget[0], &layout.name_budget[1]);
+    return layout;
+}
+
+/**
+ * Format complete single-pane status bar string according to calculated layout.
+ *
+ * Truncates filename with extension preservation to layout->name_budget[0], formats
+ * metadata and responsive hint text, and ensures NUL termination.
+ *
+ * @param layout Layout specifying budget and hint tier.
+ * @param name Filename or path for image.
+ * @param img_w Image pixel width.
+ * @param img_h Image pixel height.
+ * @param zoom_pct Zoom level percentage.
+ * @param is_sync True if sync mode is active.
+ * @param file_idx Current image index.
+ * @param file_count Total image count.
+ * @param out_buf Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ * @return Number of characters written (excluding NUL).
+ */
+int viewer_format_status_single(
+    const ViewerStatusBarLayout *layout, const char *name,
+    int img_w, int img_h, int zoom_pct, bool is_sync,
+    int file_idx, int file_count, char *out_buf, size_t out_sz)
+{
+    if (!out_buf || out_sz == 0) return 0;
+    out_buf[0] = '\0';
+    if (!layout) return 0;
+
+    const char *b = name ? strrchr(name, '/') : NULL;
+    const char *fname = b ? b + 1 : (name ? name : "");
+
+    char trunc[512];
+    viewer_truncate_filename(fname, trunc, sizeof(trunc), layout->name_budget[0]);
+
+    ViewerHintTier tier = layout->hint_tier;
+    if (tier < 0 || tier >= VIEWER_HINT_TIER_COUNT) {
+        tier = VIEWER_HINT_NONE;
+    }
+    const char *hint = s_hint_single[tier];
+
+    if (hint && hint[0] != '\0') {
+        snprintf(out_buf, out_sz, "%s  %dx%d  %d%%  %s  %d/%d  %s",
+            trunc, img_w, img_h, zoom_pct, is_sync ? "SYNC" : "FREE",
+            file_idx, file_count, hint);
+    } else {
+        snprintf(out_buf, out_sz, "%s  %dx%d  %d%%  %s  %d/%d",
+            trunc, img_w, img_h, zoom_pct, is_sync ? "SYNC" : "FREE",
+            file_idx, file_count);
+    }
+    out_buf[out_sz - 1] = '\0';
+    return (int)strlen(out_buf);
+}
+
+/**
+ * Format complete dual-pane status bar string according to calculated layout.
+ *
+ * Truncates filenames using layout->name_budget[0] and layout->name_budget[1], formats
+ * metadata for both panes, active pane indicator, and responsive hint text, and ensures
+ * NUL termination.
+ *
+ * @param layout Layout specifying budgets and hint tier.
+ * @param name0 Filename or path for pane 0.
+ * @param img0_w Pixel width of pane 0 image.
+ * @param img0_h Pixel height of pane 0 image.
+ * @param name1 Filename or path for pane 1.
+ * @param img1_w Pixel width of pane 1 image.
+ * @param img1_h Pixel height of pane 1 image.
+ * @param zoom_pct Zoom level percentage.
+ * @param is_sync True if sync mode is active.
+ * @param active_pane Active pane index (0 or 1).
+ * @param out_buf Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ * @return Number of characters written (excluding NUL).
+ */
+int viewer_format_status_dual(
+    const ViewerStatusBarLayout *layout, const char *name0,
+    int img0_w, int img0_h, const char *name1,
+    int img1_w, int img1_h, int zoom_pct, bool is_sync,
+    int active_pane, char *out_buf, size_t out_sz)
+{
+    if (!out_buf || out_sz == 0) return 0;
+    out_buf[0] = '\0';
+    if (!layout) return 0;
+
+    const char *b0 = name0 ? strrchr(name0, '/') : NULL;
+    const char *fname0 = b0 ? b0 + 1 : (name0 ? name0 : "");
+    const char *b1 = name1 ? strrchr(name1, '/') : NULL;
+    const char *fname1 = b1 ? b1 + 1 : (name1 ? name1 : "");
+
+    char trunc0[512];
+    char trunc1[512];
+    viewer_truncate_filename(fname0, trunc0, sizeof(trunc0), layout->name_budget[0]);
+    viewer_truncate_filename(fname1, trunc1, sizeof(trunc1), layout->name_budget[1]);
+
+    const char *pane_ind = is_sync ? "" : (active_pane == 0 ? " [L*]" : " [R*]");
+
+    ViewerHintTier tier = layout->hint_tier;
+    if (tier < 0 || tier >= VIEWER_HINT_TIER_COUNT) {
+        tier = VIEWER_HINT_NONE;
+    }
+    const char *hint = s_hint_dual[tier];
+
+    if (hint && hint[0] != '\0') {
+        snprintf(out_buf, out_sz, "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s  %s",
+            trunc0, img0_w, img0_h, trunc1, img1_w, img1_h, zoom_pct,
+            is_sync ? "SYNC" : "FREE", pane_ind, hint);
+    } else {
+        snprintf(out_buf, out_sz, "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s",
+            trunc0, img0_w, img0_h, trunc1, img1_w, img1_h, zoom_pct,
+            is_sync ? "SYNC" : "FREE", pane_ind);
+    }
+    out_buf[out_sz - 1] = '\0';
+    return (int)strlen(out_buf);
+}
+
 /**
  * Render bottom status bar with filename, resolution, zoom, sync, and index.
  *
@@ -774,31 +1082,30 @@ void viewer_render_info_bar(SDL_Renderer *ren) {
     if (g_count == 1) {
         const char *b = g_img[0].path ? strrchr(g_img[0].path, '/') : NULL;
         b = b ? b + 1 : (g_img[0].path ? g_img[0].path : "?");
-        char trunc_b[VIEWER_INFO_NAME_MAX + 1];
-        viewer_truncate_filename(b, trunc_b, sizeof(trunc_b), VIEWER_INFO_NAME_MAX);
-        len = snprintf(line, sizeof(line), "%s  %dx%d  %d%%  %s  %d/%d  [s]ync [Tab] pane [f]ull [n/p] next/prev [e] exif [ESC] browser",
-            trunc_b, g_img[0].w, g_img[0].h, pct, g_sync ? "SYNC" : "FREE", g_file_index + 1, g_file_count);
+        ViewerStatusBarLayout layout = viewer_calc_status_layout_single(
+            g_win_w, b, g_img[0].w, g_img[0].h, pct, g_sync, g_file_index + 1, g_file_count);
+        len = viewer_format_status_single(
+            &layout, b, g_img[0].w, g_img[0].h, pct, g_sync, g_file_index + 1, g_file_count,
+            line, sizeof(line));
     } else if (g_count == 2) {
         const char *b0 = g_img[0].path ? strrchr(g_img[0].path, '/') : NULL;
         const char *b1 = g_img[1].path ? strrchr(g_img[1].path, '/') : NULL;
         b0 = b0 ? b0 + 1 : (g_img[0].path ? g_img[0].path : "?");
         b1 = b1 ? b1 + 1 : (g_img[1].path ? g_img[1].path : "?");
-        char trunc_b0[VIEWER_INFO_DUAL_NAME_MAX + 1];
-        char trunc_b1[VIEWER_INFO_DUAL_NAME_MAX + 1];
-        viewer_truncate_filename(b0, trunc_b0, sizeof(trunc_b0), VIEWER_INFO_DUAL_NAME_MAX);
-        viewer_truncate_filename(b1, trunc_b1, sizeof(trunc_b1), VIEWER_INFO_DUAL_NAME_MAX);
-        len = snprintf(line, sizeof(line), "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s  [e] exif",
-            trunc_b0, g_img[0].w, g_img[0].h, trunc_b1, g_img[1].w, g_img[1].h, pct,
-            g_sync ? "SYNC" : "FREE", g_sync ? "" : (g_active == 0 ? " [L*]" : " [R*]"));
+        ViewerStatusBarLayout layout = viewer_calc_status_layout_dual(
+            g_win_w, b0, g_img[0].w, g_img[0].h, b1, g_img[1].w, g_img[1].h, pct, g_sync, g_active);
+        len = viewer_format_status_dual(
+            &layout, b0, g_img[0].w, g_img[0].h, b1, g_img[1].w, g_img[1].h, pct, g_sync, g_active,
+            line, sizeof(line));
     } else {
         return;
     }
-    if (len < 0) return;
+    if (len <= 0) return;
     SDL_Color white = {220, 220, 220, 255};
-    int max_chars = g_win_w / 8 - 1;
+    int max_chars = (g_win_w - 2 * VIEWER_INFO_MARGIN_X) / VIEWER_INFO_FONT_W;
     if (max_chars < 0) max_chars = 0;
     if (len > max_chars) line[max_chars] = '\0';
-    text_draw(ren, 6, g_win_h - bar_h + 7, line, white, 1);
+    text_draw(ren, VIEWER_INFO_MARGIN_X, g_win_h - bar_h + 7, line, white, 1);
 }
 
 /**
