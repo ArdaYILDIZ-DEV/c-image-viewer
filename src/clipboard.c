@@ -290,37 +290,63 @@ bool clipboard_copy_text(const char *text) {
     return false;
 }
 
+/**
+ * Feed the contents of an open file descriptor into an external clipboard tool.
+ *
+ * Evaluates candidates in priority order:
+ *   1. wl-copy --type image/png (Wayland only)
+ *   2. wl-copy (Wayland only)
+ *   3. xclip -selection clipboard -t image/png
+ *   4. xclip -selection clipboard
+ *   5. xsel -b -i
+ *
+ * Rewinds the file descriptor to offset 0 before each invocation to guarantee
+ * clean retries across candidate tools.
+ *
+ * @param fd Open readable and seekable file descriptor containing image payload.
+ * @return true if any clipboard tool accepted the payload and exited with code 0.
+ */
 static bool copy_fd_via_tool(int fd) {
+    if (fd < 0) return false;
+
+    static const struct {
+        const char *tool;
+        bool wayland_only;
+        char *const argv[8];
+    } candidates[] = {
+        {"wl-copy", true,  {"wl-copy", "--type", "image/png", NULL}},
+        {"wl-copy", true,  {"wl-copy", NULL}},
+        {"xclip",   false, {"xclip", "-selection", "clipboard", "-t", "image/png", NULL}},
+        {"xclip",   false, {"xclip", "-selection", "clipboard", NULL}},
+        {"xsel",    false, {"xsel", "-b", "-i", NULL}},
+    };
+
     const char *wayland = getenv("WAYLAND_DISPLAY");
+    bool has_wayland = (wayland && wayland[0] != '\0');
 
-    if (wayland && wayland[0] != '\0' && command_exists("wl-copy")) {
-        if (lseek(fd, 0, SEEK_SET) != (off_t)-1) {
-            char *const argv1[] = {"wl-copy", "--type", "image/png", NULL};
-            if (run_command_with_stdin_fd(argv1, fd)) return true;
+    const char *checked_tool = NULL;
+    bool tool_available = false;
+
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if (candidates[i].wayland_only && !has_wayland) {
+            continue;
         }
 
-        if (lseek(fd, 0, SEEK_SET) != (off_t)-1) {
-            char *const argv2[] = {"wl-copy", NULL};
-            if (run_command_with_stdin_fd(argv2, fd)) return true;
-        }
-    }
-
-    if (command_exists("xclip")) {
-        if (lseek(fd, 0, SEEK_SET) != (off_t)-1) {
-            char *const argv1[] = {"xclip", "-selection", "clipboard", "-t", "image/png", NULL};
-            if (run_command_with_stdin_fd(argv1, fd)) return true;
+        if (checked_tool == NULL || strcmp(candidates[i].tool, checked_tool) != 0) {
+            checked_tool = candidates[i].tool;
+            tool_available = command_exists(candidates[i].tool);
         }
 
-        if (lseek(fd, 0, SEEK_SET) != (off_t)-1) {
-            char *const argv2[] = {"xclip", "-selection", "clipboard", NULL};
-            if (run_command_with_stdin_fd(argv2, fd)) return true;
+        if (!tool_available) {
+            continue;
         }
-    }
 
-    if (command_exists("xsel")) {
-        if (lseek(fd, 0, SEEK_SET) != (off_t)-1) {
-            char *const argv[] = {"xsel", "--clipboard", "--input", NULL};
-            if (run_command_with_stdin_fd(argv, fd)) return true;
+        if (lseek(fd, 0, SEEK_SET) == (off_t)-1) {
+            continue;
+        }
+
+        if (run_command_with_stdin_fd(candidates[i].argv, fd)) {
+            return true;
         }
     }
 
