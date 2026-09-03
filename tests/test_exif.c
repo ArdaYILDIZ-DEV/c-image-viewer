@@ -547,6 +547,74 @@ static void test_exif_ascii_sanitization_and_garbage(void) {
     unlink(garbage_file);
 }
 
+static void test_exif_systematic_truncation_stress(void) {
+    const char *tmp = "/tmp/civ_test_trunc_stress.jpg";
+    uint8_t buf[512];
+    memset(buf, 0, sizeof(buf));
+
+    // Synthesize valid JPEG with full EXIF segment
+    buf[0] = 0xFF; buf[1] = 0xD8; // SOI
+    buf[2] = 0xFF; buf[3] = 0xE1; // APP1
+    uint16_t seg_len = 200;
+    buf[4] = (uint8_t)(seg_len >> 8);
+    buf[5] = (uint8_t)(seg_len & 0xFF);
+    memcpy(buf + 6, "Exif\0\0", 6);
+
+    uint8_t *tiff = buf + 12;
+    tiff[0] = 'I'; tiff[1] = 'I'; // Little-endian
+    tiff[2] = 0x2A; tiff[3] = 0x00; // Magic 42
+    tiff[4] = 0x08; tiff[5] = 0x00; tiff[6] = 0x00; tiff[7] = 0x00; // IFD0 offset: 8
+
+    // IFD0 at tiff + 8: 2 tags
+    tiff[8] = 0x02; tiff[9] = 0x00;
+    // Tag 1: Orientation (0x0112) = 1
+    size_t e0 = 10;
+    tiff[e0 + 0] = 0x12; tiff[e0 + 1] = 0x01;
+    tiff[e0 + 2] = 0x03; tiff[e0 + 3] = 0x00;
+    tiff[e0 + 4] = 0x01; tiff[e0 + 5] = 0x00;
+    tiff[e0 + 6] = 0x00; tiff[e0 + 7] = 0x00;
+    tiff[e0 + 8] = 0x01; tiff[e0 + 9] = 0x00;
+    tiff[e0 + 10] = 0x00; tiff[e0 + 11] = 0x00;
+
+    // Tag 2: Exif Sub-IFD offset (0x8769) = 60
+    size_t e1 = e0 + 12;
+    tiff[e1 + 0] = 0x69; tiff[e1 + 1] = 0x87;
+    tiff[e1 + 2] = 0x04; tiff[e1 + 3] = 0x00;
+    tiff[e1 + 4] = 0x01; tiff[e1 + 5] = 0x00;
+    tiff[e1 + 6] = 0x00; tiff[e1 + 7] = 0x00;
+    tiff[e1 + 8] = 60;   tiff[e1 + 9] = 0x00;
+    tiff[e1 + 10] = 0x00; tiff[e1 + 11] = 0x00;
+
+    // Next IFD = 0
+    tiff[e1 + 12] = 0x00; tiff[e1 + 13] = 0x00;
+    tiff[e1 + 14] = 0x00; tiff[e1 + 15] = 0x00;
+
+    // Sub-IFD at tiff + 60: 1 tag
+    tiff[60] = 0x01; tiff[61] = 0x00;
+    size_t se0 = 62;
+    // Tag: ISO (0x8827) = 400
+    tiff[se0 + 0] = 0x27; tiff[se0 + 1] = 0x88;
+    tiff[se0 + 2] = 0x03; tiff[se0 + 3] = 0x00;
+    tiff[se0 + 4] = 0x01; tiff[se0 + 5] = 0x00;
+    tiff[se0 + 6] = 0x00; tiff[se0 + 7] = 0x00;
+    tiff[se0 + 8] = 0x90; tiff[se0 + 9] = 0x01;
+    tiff[se0 + 10] = 0x00; tiff[se0 + 11] = 0x00;
+
+    size_t full_len = 12 + 80;
+
+    // Truncate at EVERY single byte from 0 to full_len
+    for (size_t trunc_len = 0; trunc_len <= full_len; trunc_len++) {
+        write_file(tmp, buf, trunc_len);
+
+        ExifData data;
+        bool ok = exif_read(tmp, &data);
+        TEST_ASSERT(ok); // File exists and is readable
+        TEST_ASSERT_INT_EQ(data.orientation, 1); // Default orientation maintained
+    }
+
+    unlink(tmp);
+}
+
 void run_exif_tests(void) {
     printf("--- EXIF Test Suite ---\n");
     TEST_RUN(test_exif_null_inputs);
@@ -558,4 +626,5 @@ void run_exif_tests(void) {
     TEST_RUN(test_exif_circular_ifd);
     TEST_RUN(test_exif_zero_denominators_and_nan);
     TEST_RUN(test_exif_ascii_sanitization_and_garbage);
+    TEST_RUN(test_exif_systematic_truncation_stress);
 }
