@@ -2197,6 +2197,462 @@ static void test_viewer_stress_lifecycle_and_mutation(void) {
     snprintf(g_current_dir, sizeof(g_current_dir), "%s", orig_dir);
 }
 
+static void test_viewer_path_join_boundary(void) {
+    char out[128];
+
+    // NULL pointers and zero destination size
+    TEST_ASSERT(!viewer_path_join(NULL, sizeof(out), "/dir", "file.png"));
+    TEST_ASSERT(!viewer_path_join(out, sizeof(out), NULL, "file.png"));
+    TEST_ASSERT(!viewer_path_join(out, sizeof(out), "/dir", NULL));
+    TEST_ASSERT(!viewer_path_join(out, 0, "/dir", "file.png"));
+
+    // dst_size == 1 edge cases
+    char tiny[1];
+    TEST_ASSERT(!viewer_path_join(tiny, 1, "/dir", "file.png"));
+    TEST_ASSERT(!viewer_path_join(tiny, 1, "/", "file.png"));
+    TEST_ASSERT(!viewer_path_join(tiny, 1, "/", ""));
+    TEST_ASSERT(!viewer_path_join(tiny, 1, "a", ""));
+    // dst_size == 1 can hold empty string when dir and file are both empty
+    TEST_ASSERT(viewer_path_join(tiny, 1, "", ""));
+    TEST_ASSERT_STR_EQ(tiny, "");
+
+    // Directory prefix variations
+    // dir = "/"
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "/", "image.png"));
+    TEST_ASSERT_STR_EQ(out, "/image.png");
+
+    // dir = "///" (multiple root slashes collapsed)
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "///", "image.png"));
+    TEST_ASSERT_STR_EQ(out, "/image.png");
+
+    // dir = "/a/b/" (trailing slash removed before joining)
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "/a/b/", "image.png"));
+    TEST_ASSERT_STR_EQ(out, "/a/b/image.png");
+
+    // dir = "/a/b" (no trailing slash)
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "/a/b", "image.png"));
+    TEST_ASSERT_STR_EQ(out, "/a/b/image.png");
+
+    // dir = "relative/path"
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "relative/path", "image.png"));
+    TEST_ASSERT_STR_EQ(out, "relative/path/image.png");
+
+    // dir = "relative/path/"
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "relative/path/", "image.png"));
+    TEST_ASSERT_STR_EQ(out, "relative/path/image.png");
+
+    // dir = "" (empty dir)
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "", "image.png"));
+    TEST_ASSERT_STR_EQ(out, "image.png");
+
+    // File variations
+    // file = "/image.png" (leading slash stripped)
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "/a/b", "/image.png"));
+    TEST_ASSERT_STR_EQ(out, "/a/b/image.png");
+
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "/", "/image.png"));
+    TEST_ASSERT_STR_EQ(out, "/image.png");
+
+    // file = "///image.png" (multiple leading slashes stripped)
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "/a/b", "///image.png"));
+    TEST_ASSERT_STR_EQ(out, "/a/b/image.png");
+
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "///", "///image.png"));
+    TEST_ASSERT_STR_EQ(out, "/image.png");
+
+    // file = "" (empty filename preserves dir without trailing slash)
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "/a/b/", ""));
+    TEST_ASSERT_STR_EQ(out, "/a/b");
+
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "/a/b", ""));
+    TEST_ASSERT_STR_EQ(out, "/a/b");
+
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "/", ""));
+    TEST_ASSERT_STR_EQ(out, "/");
+
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "///", ""));
+    TEST_ASSERT_STR_EQ(out, "/");
+
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "relative/path", ""));
+    TEST_ASSERT_STR_EQ(out, "relative/path");
+
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "relative/path/", ""));
+    TEST_ASSERT_STR_EQ(out, "relative/path");
+
+    // file with only slashes "///"
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "/a/b/", "///"));
+    TEST_ASSERT_STR_EQ(out, "/a/b");
+
+    TEST_ASSERT(viewer_path_join(out, sizeof(out), "/", "///"));
+    TEST_ASSERT_STR_EQ(out, "/");
+
+    // Exact buffer fit checks:
+    // dir = "/dir" (strlen 4), file = "img.png" (strlen 7)
+    // Joined string is "/dir/img.png" (strlen 12).
+    // Total buffer required = strlen(dir) + 1 + strlen(file) + 1 = 4 + 1 + 7 + 1 = 13 bytes.
+    char b13[13];
+    TEST_ASSERT(viewer_path_join(b13, sizeof(b13), "/dir", "img.png"));
+    TEST_ASSERT_STR_EQ(b13, "/dir/img.png");
+    TEST_ASSERT_INT_EQ((int)strlen(b13), 12);
+
+    // dst_size < needed (12 bytes for a 12-char string + null terminator)
+    char b12[12];
+    TEST_ASSERT(!viewer_path_join(b12, sizeof(b12), "/dir", "img.png"));
+
+    // dst_size > needed (14 bytes)
+    char b14[14];
+    TEST_ASSERT(viewer_path_join(b14, sizeof(b14), "/dir", "img.png"));
+    TEST_ASSERT_STR_EQ(b14, "/dir/img.png");
+
+    // Exact fit with trailing slash on dir:
+    // dir = "/dir/" (strlen 5, stripped to 4), file = "img.png" (strlen 7).
+    // Still produces "/dir/img.png" which requires 13 bytes.
+    TEST_ASSERT(viewer_path_join(b13, 13, "/dir/", "img.png"));
+    TEST_ASSERT_STR_EQ(b13, "/dir/img.png");
+    TEST_ASSERT(!viewer_path_join(b12, 12, "/dir/", "img.png"));
+
+    // Exact fit with root dir:
+    // dir = "/", file = "x" -> "/x" (strlen 2, requires 3 bytes).
+    char b3[3];
+    TEST_ASSERT(viewer_path_join(b3, sizeof(b3), "/", "x"));
+    TEST_ASSERT_STR_EQ(b3, "/x");
+    char b2[2];
+    TEST_ASSERT(!viewer_path_join(b2, sizeof(b2), "/", "x"));
+}
+
+static void test_viewer_reset_1to1_invariants(void) {
+    // Backup current viewer state
+    int orig_count = g_count;
+    float orig_zoom = g_zoom;
+    float orig_pan_x = g_pan_x;
+    float orig_pan_y = g_pan_y;
+    float orig_fz[2] = { g_free_zoom[0], g_free_zoom[1] };
+    float orig_fpx[2] = { g_free_pan_x[0], g_free_pan_x[1] };
+    float orig_fpy[2] = { g_free_pan_y[0], g_free_pan_y[1] };
+
+    // Test with g_count == 0
+    g_count = 0;
+    g_zoom = 5.25f;
+    g_pan_x = 120.5f;
+    g_pan_y = -340.0f;
+    g_free_zoom[0] = 0.25f;
+    g_free_zoom[1] = 8.0f;
+    g_free_pan_x[0] = 50.0f;
+    g_free_pan_x[1] = -75.0f;
+    g_free_pan_y[0] = 180.0f;
+    g_free_pan_y[1] = -220.0f;
+
+    viewer_reset_1to1();
+
+    TEST_ASSERT_INT_EQ(g_count, 0);
+    TEST_ASSERT(g_zoom == 1.0f);
+    TEST_ASSERT(g_pan_x == 0.0f);
+    TEST_ASSERT(g_pan_y == 0.0f);
+    TEST_ASSERT(g_free_zoom[0] == 1.0f);
+    TEST_ASSERT(g_free_zoom[1] == 1.0f);
+    TEST_ASSERT(g_free_pan_x[0] == 0.0f);
+    TEST_ASSERT(g_free_pan_x[1] == 0.0f);
+    TEST_ASSERT(g_free_pan_y[0] == 0.0f);
+    TEST_ASSERT(g_free_pan_y[1] == 0.0f);
+
+    // Test with g_count == 1
+    g_count = 1;
+    g_zoom = 0.05f;
+    g_pan_x = -999.0f;
+    g_pan_y = 888.0f;
+    g_free_zoom[0] = 16.0f;
+    g_free_zoom[1] = 0.1f;
+    g_free_pan_x[0] = -12.3f;
+    g_free_pan_x[1] = 45.6f;
+    g_free_pan_y[0] = -78.9f;
+    g_free_pan_y[1] = 101.1f;
+
+    viewer_reset_1to1();
+
+    TEST_ASSERT_INT_EQ(g_count, 1);
+    TEST_ASSERT(g_zoom == 1.0f);
+    TEST_ASSERT(g_pan_x == 0.0f);
+    TEST_ASSERT(g_pan_y == 0.0f);
+    TEST_ASSERT(g_free_zoom[0] == 1.0f);
+    TEST_ASSERT(g_free_zoom[1] == 1.0f);
+    TEST_ASSERT(g_free_pan_x[0] == 0.0f);
+    TEST_ASSERT(g_free_pan_x[1] == 0.0f);
+    TEST_ASSERT(g_free_pan_y[0] == 0.0f);
+    TEST_ASSERT(g_free_pan_y[1] == 0.0f);
+
+    // Test with g_count == 2
+    g_count = 2;
+    g_zoom = 32.0f;
+    g_pan_x = 42.0f;
+    g_pan_y = -42.0f;
+    g_free_zoom[0] = 3.14f;
+    g_free_zoom[1] = 2.71f;
+    g_free_pan_x[0] = 1000.0f;
+    g_free_pan_x[1] = -1000.0f;
+    g_free_pan_y[0] = 2000.0f;
+    g_free_pan_y[1] = -2000.0f;
+
+    viewer_reset_1to1();
+
+    TEST_ASSERT_INT_EQ(g_count, 2);
+    TEST_ASSERT(g_zoom == 1.0f);
+    TEST_ASSERT(g_pan_x == 0.0f);
+    TEST_ASSERT(g_pan_y == 0.0f);
+    TEST_ASSERT(g_free_zoom[0] == 1.0f);
+    TEST_ASSERT(g_free_zoom[1] == 1.0f);
+    TEST_ASSERT(g_free_pan_x[0] == 0.0f);
+    TEST_ASSERT(g_free_pan_x[1] == 0.0f);
+    TEST_ASSERT(g_free_pan_y[0] == 0.0f);
+    TEST_ASSERT(g_free_pan_y[1] == 0.0f);
+
+    // Test idempotence (calling again changes nothing)
+    viewer_reset_1to1();
+    TEST_ASSERT(g_zoom == 1.0f);
+    TEST_ASSERT(g_pan_x == 0.0f);
+    TEST_ASSERT(g_pan_y == 0.0f);
+    TEST_ASSERT(g_free_zoom[0] == 1.0f);
+    TEST_ASSERT(g_free_zoom[1] == 1.0f);
+    TEST_ASSERT(g_free_pan_x[0] == 0.0f);
+    TEST_ASSERT(g_free_pan_x[1] == 0.0f);
+    TEST_ASSERT(g_free_pan_y[0] == 0.0f);
+    TEST_ASSERT(g_free_pan_y[1] == 0.0f);
+
+    // Restore original viewer state
+    g_count = orig_count;
+    g_zoom = orig_zoom;
+    g_pan_x = orig_pan_x;
+    g_pan_y = orig_pan_y;
+    g_free_zoom[0] = orig_fz[0];
+    g_free_zoom[1] = orig_fz[1];
+    g_free_pan_x[0] = orig_fpx[0];
+    g_free_pan_x[1] = orig_fpx[1];
+    g_free_pan_y[0] = orig_fpy[0];
+    g_free_pan_y[1] = orig_fpy[1];
+}
+
+static void test_viewer_deep_directory_and_navigation_stress(void) {
+    char base_dir[] = "/tmp/civ_vdeep_XXXXXX";
+    char *bd = mkdtemp(base_dir);
+    TEST_ASSERT(bd != NULL);
+
+    // Save viewer state
+    int orig_count = g_count;
+    int orig_file_index = g_file_index;
+    int orig_file_count = g_file_count;
+    char orig_dir[PATH_MAX];
+    snprintf(orig_dir, sizeof(orig_dir), "%s", g_current_dir);
+
+    // Build a 20-level deep directory tree
+    const int depth = 20;
+    char current_path[PATH_MAX];
+    snprintf(current_path, sizeof(current_path), "%s", base_dir);
+    char dir_chain[20][PATH_MAX];
+
+    for (int i = 0; i < depth; i++) {
+        char next_path[PATH_MAX];
+        snprintf(next_path, sizeof(next_path), "%.4000s/lvl%02d", current_path, i);
+        TEST_ASSERT_INT_EQ(mkdir(next_path, 0755), 0);
+        snprintf(dir_chain[i], sizeof(dir_chain[i]), "%s", next_path);
+        snprintf(current_path, sizeof(current_path), "%s", next_path);
+    }
+
+    // Place an image at level 19 (deepest) and level 18 (parent)
+    char deep_img[PATH_MAX];
+    snprintf(deep_img, sizeof(deep_img), "%.4000s/deep_leaf.png", current_path);
+    uint8_t px[4] = {255, 0, 0, 255};
+    TEST_ASSERT(stbi_write_png(deep_img, 1, 1, 4, px, 4));
+
+    char parent_img[PATH_MAX];
+    snprintf(parent_img, sizeof(parent_img), "%.4000s/deep_parent.png", dir_chain[depth - 2]);
+    TEST_ASSERT(stbi_write_png(parent_img, 1, 1, 4, px, 4));
+
+    // Test viewer_path_join on deep path
+    char joined[PATH_MAX];
+    TEST_ASSERT(viewer_path_join(joined, sizeof(joined), current_path, "deep_leaf.png"));
+    TEST_ASSERT_STR_EQ(joined, deep_img);
+
+    // Test viewer_truncate_path on deep path with various max_len
+    char tr_out[PATH_MAX];
+    viewer_truncate_path(deep_img, tr_out, sizeof(tr_out), 20);
+    TEST_ASSERT((int)strlen(tr_out) <= 20);
+    TEST_ASSERT(strstr(tr_out, "...") != NULL);
+
+    viewer_truncate_path(deep_img, tr_out, sizeof(tr_out), 10);
+    TEST_ASSERT((int)strlen(tr_out) <= 10);
+
+    viewer_truncate_path(deep_img, tr_out, sizeof(tr_out), 2);
+    TEST_ASSERT((int)strlen(tr_out) <= 2);
+
+    viewer_truncate_path(deep_img, tr_out, sizeof(tr_out), (int)strlen(deep_img) + 10);
+    TEST_ASSERT_STR_EQ(tr_out, deep_img);
+
+    // Scan the deepest directory
+    TEST_ASSERT(viewer_scan_current_dir(deep_img));
+    TEST_ASSERT_INT_EQ(g_file_count, 1);
+    TEST_ASSERT_INT_EQ(g_file_index, 0);
+
+    // Test viewer_go_parent navigation from level 19 to level 18
+    TEST_ASSERT(viewer_go_parent());
+    TEST_ASSERT_INT_EQ(g_file_count, 1);
+    TEST_ASSERT(strstr(g_file_list[0], "deep_parent.png") != NULL);
+
+    // Cleanup
+    viewer_free_file_list();
+    viewer_unload_image(&g_img[0]);
+    viewer_unload_image(&g_img[1]);
+
+    unlink(deep_img);
+    unlink(parent_img);
+    for (int i = depth - 1; i >= 0; i--) {
+        rmdir(dir_chain[i]);
+    }
+    rmdir(base_dir);
+
+    g_count = orig_count;
+    g_file_index = orig_file_index;
+    g_file_count = orig_file_count;
+    snprintf(g_current_dir, sizeof(g_current_dir), "%s", orig_dir);
+}
+
+static void test_viewer_empty_and_non_image_stress(void) {
+    char base_dir[] = "/tmp/civ_vempty_XXXXXX";
+    char *bd = mkdtemp(base_dir);
+    TEST_ASSERT(bd != NULL);
+
+    int orig_count = g_count;
+    int orig_file_index = g_file_index;
+    int orig_file_count = g_file_count;
+    char orig_dir[PATH_MAX];
+    snprintf(orig_dir, sizeof(orig_dir), "%s", g_current_dir);
+
+    char f_empty_png[PATH_MAX];
+    char f_corrupt_jpg[PATH_MAX];
+    char f_text[PATH_MAX];
+    char f_script[PATH_MAX];
+    char f_bak[PATH_MAX];
+    char f_valid_png[PATH_MAX];
+
+    snprintf(f_empty_png, sizeof(f_empty_png), "%s/empty.png", base_dir);
+    snprintf(f_corrupt_jpg, sizeof(f_corrupt_jpg), "%s/corrupt.jpg", base_dir);
+    snprintf(f_text, sizeof(f_text), "%s/notes.txt", base_dir);
+    snprintf(f_script, sizeof(f_script), "%s/run.sh", base_dir);
+    snprintf(f_bak, sizeof(f_bak), "%s/photo.png.bak", base_dir);
+    snprintf(f_valid_png, sizeof(f_valid_png), "%s/valid.png", base_dir);
+
+    // 1. Empty file (0 bytes)
+    FILE *fe = fopen(f_empty_png, "wb");
+    TEST_ASSERT(fe != NULL);
+    fclose(fe);
+
+    // 2. Corrupted file with image extension
+    FILE *fc = fopen(f_corrupt_jpg, "wb");
+    TEST_ASSERT(fc != NULL);
+    fputs("NOT A JPEG AT ALL", fc);
+    fclose(fc);
+
+    // 3. Non-image text file
+    FILE *ft = fopen(f_text, "wb");
+    TEST_ASSERT(ft != NULL);
+    fputs("plain text notes\n", ft);
+    fclose(ft);
+
+    // 4. Non-image script
+    FILE *fs = fopen(f_script, "wb");
+    TEST_ASSERT(fs != NULL);
+    fputs("#!/bin/sh\necho hi\n", fs);
+    fclose(fs);
+
+    // 5. Backup file
+    FILE *fb = fopen(f_bak, "wb");
+    TEST_ASSERT(fb != NULL);
+    fputs("backup", fb);
+    fclose(fb);
+
+    // 6. Valid 1x1 PNG
+    uint8_t px[4] = {0, 255, 0, 255};
+    TEST_ASSERT(stbi_write_png(f_valid_png, 1, 1, 4, px, 4));
+
+    // Test viewer_is_image_file extension filtering
+    TEST_ASSERT(viewer_is_image_file("file.png"));
+    TEST_ASSERT(viewer_is_image_file("file.jpg"));
+    TEST_ASSERT(viewer_is_image_file("file.JPEG"));
+    TEST_ASSERT(viewer_is_image_file("file.webp"));
+    TEST_ASSERT(!viewer_is_image_file("notes.txt"));
+    TEST_ASSERT(!viewer_is_image_file("run.sh"));
+    TEST_ASSERT(!viewer_is_image_file("photo.png.bak"));
+    TEST_ASSERT(!viewer_is_image_file("photo.jpg~"));
+    TEST_ASSERT(!viewer_is_image_file("archive.tar.gz"));
+    TEST_ASSERT(!viewer_is_image_file("no_extension"));
+    TEST_ASSERT(!viewer_is_image_file(".hidden"));
+    TEST_ASSERT(viewer_is_image_file(".png"));
+    TEST_ASSERT(!viewer_is_image_file("trailing_dot."));
+    TEST_ASSERT(!viewer_is_image_file(""));
+
+    // Test viewer_validate_image_path
+    char clean[PATH_MAX];
+    // Empty PNG: valid regular file with image extension
+    TEST_ASSERT(viewer_validate_image_path(f_empty_png, clean, sizeof(clean)));
+    // Corrupt JPG: valid regular file with image extension
+    TEST_ASSERT(viewer_validate_image_path(f_corrupt_jpg, clean, sizeof(clean)));
+    // Text and script files: rejected because of extension
+    TEST_ASSERT(!viewer_validate_image_path(f_text, clean, sizeof(clean)));
+    TEST_ASSERT(!viewer_validate_image_path(f_script, clean, sizeof(clean)));
+    TEST_ASSERT(!viewer_validate_image_path(f_bak, clean, sizeof(clean)));
+    // Non-existent file: rejected
+    TEST_ASSERT(!viewer_validate_image_path("/tmp/nonexistent_12345.png", clean, sizeof(clean)));
+    // NULL or empty: rejected
+    TEST_ASSERT(!viewer_validate_image_path(NULL, clean, sizeof(clean)));
+    TEST_ASSERT(!viewer_validate_image_path("", clean, sizeof(clean)));
+
+    // Test viewer_load_image failure modes on 0-byte and corrupted files
+    Image im = {0};
+    TEST_ASSERT(!viewer_load_image(f_empty_png, &im));
+    TEST_ASSERT(im.tex == NULL);
+    TEST_ASSERT(im.path == NULL);
+    TEST_ASSERT_INT_EQ(im.w, 0);
+
+    TEST_ASSERT(!viewer_load_image(f_corrupt_jpg, &im));
+    TEST_ASSERT(im.tex == NULL);
+    TEST_ASSERT(im.path == NULL);
+
+    TEST_ASSERT(!viewer_load_image(f_text, &im));
+    TEST_ASSERT(im.tex == NULL);
+
+    // Valid file loads cleanly
+    TEST_ASSERT(viewer_load_image(f_valid_png, &im));
+    TEST_ASSERT(im.tex != NULL);
+    TEST_ASSERT(im.path != NULL);
+    TEST_ASSERT_INT_EQ(im.w, 1);
+    TEST_ASSERT_INT_EQ(im.h, 1);
+    viewer_unload_image(&im);
+
+    // Directory scan on base_dir: only files with image extensions are included
+    TEST_ASSERT(viewer_scan_current_dir(f_valid_png));
+    // Should contain empty.png, corrupt.jpg, and valid.png (3 files), NOT notes.txt, run.sh, photo.png.bak
+    TEST_ASSERT_INT_EQ(g_file_count, 3);
+
+    // Verify navigation skips corrupt and empty files
+    viewer_navigate(+1);
+
+    // Cleanup
+    viewer_free_file_list();
+    viewer_unload_image(&g_img[0]);
+    viewer_unload_image(&g_img[1]);
+
+    unlink(f_empty_png);
+    unlink(f_corrupt_jpg);
+    unlink(f_text);
+    unlink(f_script);
+    unlink(f_bak);
+    unlink(f_valid_png);
+    rmdir(base_dir);
+
+    g_count = orig_count;
+    g_file_index = orig_file_index;
+    g_file_count = orig_file_count;
+    snprintf(g_current_dir, sizeof(g_current_dir), "%s", orig_dir);
+}
+
 void run_viewer_tests(void) {
     printf("--- Viewer Test Suite ---\n");
     TEST_RUN(test_viewer_is_image_file);
@@ -2226,4 +2682,8 @@ void run_viewer_tests(void) {
     TEST_RUN(test_viewer_repeated_load_unload_cycles);
     TEST_RUN(test_viewer_corrupt_load_cleanup_stress);
     TEST_RUN(test_viewer_stress_lifecycle_and_mutation);
+    TEST_RUN(test_viewer_path_join_boundary);
+    TEST_RUN(test_viewer_reset_1to1_invariants);
+    TEST_RUN(test_viewer_deep_directory_and_navigation_stress);
+    TEST_RUN(test_viewer_empty_and_non_image_stress);
 }

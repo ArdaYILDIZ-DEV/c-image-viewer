@@ -236,31 +236,6 @@ bool browser_filter_add_char(char c) {
 }
 
 /**
- * Safely joins dir and file into dst using direct memory copies.
- * Avoids snprintf format parsing overhead and repeated strlen scans.
- * Handles root directory "/" correctly to avoid producing "//file".
- * Returns true if result fits in dst_size, and optionally sets out_len.
- */
-static bool path_join(char *dst, size_t dst_size, const char *dir, const char *file, size_t *out_len) {
-    if (!dst || dst_size == 0 || !dir || !file) return false;
-    size_t dlen = strlen(dir);
-    size_t flen = strlen(file);
-    bool needs_slash = (dlen > 0 && dir[dlen - 1] != '/');
-    size_t total = dlen + (needs_slash ? 1 : 0) + flen;
-    if (total >= dst_size) return false;
-
-    memcpy(dst, dir, dlen);
-    if (needs_slash) {
-        dst[dlen] = '/';
-        memcpy(dst + dlen + 1, file, flen + 1);
-    } else {
-        memcpy(dst + dlen, file, flen + 1);
-    }
-    if (out_len) *out_len = total;
-    return true;
-}
-
-/**
  * Scan immediate children of a directory into a temporary array, sorted
  * folders-first. Hidden files (dot prefix) are skipped. For directories, we
  * include all subdirectories; for files, only supported image extensions.
@@ -281,9 +256,8 @@ static BrowserEntry *scan_dir_entries(const char *dir, int *out_n, int depth) {
     while ((ent = readdir(d)) != NULL) {
         if (ent->d_name[0] == '.') continue; // Skip hidden
 
-        size_t full_len = 0;
         char full[PATH_MAX];
-        if (!path_join(full, sizeof(full), dir, ent->d_name, &full_len)) continue;
+        if (!viewer_path_join(full, sizeof(full), dir, ent->d_name)) continue;
 
         struct stat st;
         if (stat(full, &st) != 0) continue;
@@ -297,6 +271,7 @@ static BrowserEntry *scan_dir_entries(const char *dir, int *out_n, int depth) {
 
         size_t name_len = strlen(ent->d_name);
         if (name_len >= sizeof(((BrowserEntry*)0)->name)) continue;
+        size_t full_len = strlen(full);
         if (full_len >= sizeof(((BrowserEntry*)0)->path)) continue;
 
         if (n >= cap) {

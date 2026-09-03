@@ -86,21 +86,44 @@ char g_current_dir[PATH_MAX] = {0};
 // ---------------------------------------------------------------------------
 
 /**
- * Safely joins dir and file into dst. Handles root directory "/" correctly
- * to avoid producing "//file". Returns true if result fits in dst_size.
+ * Safely join a directory path and filename into dst buffer.
+ *
+ * Handles root slashes, trailing slashes on dir, leading slashes on file,
+ * and enforces buffer bounds to prevent overflow.
  */
-static bool path_join(char *dst, size_t dst_size, const char *dir, const char *file) {
+bool viewer_path_join(char *dst, size_t dst_size, const char *dir, const char *file) {
     if (!dst || dst_size == 0 || !dir || !file) return false;
+
     size_t dlen = strlen(dir);
-    int n;
     if (dlen == 0) {
-        n = snprintf(dst, dst_size, "%s", file);
-    } else if (dir[dlen - 1] == '/') {
-        n = snprintf(dst, dst_size, "%s%s", dir, file);
-    } else {
-        n = snprintf(dst, dst_size, "%s/%s", dir, file);
+        size_t flen = strlen(file);
+        if (flen >= dst_size) return false;
+        memcpy(dst, file, flen + 1);
+        return true;
     }
-    return (n > 0 && (size_t)n < dst_size);
+
+    while (*file == '/') {
+        file++;
+    }
+
+    while (dlen > 1 && dir[dlen - 1] == '/') {
+        dlen--;
+    }
+
+    bool needs_slash = (dir[dlen - 1] != '/' && *file != '\0');
+    size_t flen = strlen(file);
+    if (flen > SIZE_MAX - dlen - 2) return false;
+    size_t total = dlen + (needs_slash ? 1 : 0) + flen;
+    if (total >= dst_size) return false;
+
+    memcpy(dst, dir, dlen);
+    if (needs_slash) {
+        dst[dlen] = '/';
+        memcpy(dst + dlen + 1, file, flen + 1);
+    } else {
+        memcpy(dst + dlen, file, flen + 1);
+    }
+    return true;
 }
 
 /**
@@ -408,7 +431,7 @@ bool viewer_scan_current_dir(const char *ref_path) {
         if (!viewer_is_image_file(ent->d_name)) continue;
 
         char full[PATH_MAX];
-        if (!path_join(full, sizeof(full), g_current_dir, ent->d_name)) continue;
+        if (!viewer_path_join(full, sizeof(full), g_current_dir, ent->d_name)) continue;
         struct stat st;
         if (stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
 
@@ -513,11 +536,44 @@ void viewer_unload_image(Image *im) {
 }
 
 /**
+ * Decode image file from disk into a 32-bit RGBA pixel buffer.
+ *
+ * Runs CPU-intensive stbi_load isolated from SDL rendering contexts.
+ * Returns dynamically allocated pixel buffer that caller must free via
+ * stbi_image_free, or NULL on failure.
+ *
+ * @param path Filesystem path to image file.
+ * @param out_w Destination pointer for image width in pixels.
+ * @param out_h Destination pointer for image height in pixels.
+ * @param out_channels Destination pointer for original channel count.
+ * @return Allocated RGBA pixel buffer on success, NULL on failure.
+ */
+static unsigned char *decode_image_surface(const char *path, int *out_w, int *out_h, int *out_channels) {
+    if (!path || !out_w || !out_h || !out_channels) return NULL;
+
+    int w = 0, h = 0, comp = 0;
+    unsigned char *data = stbi_load(path, &w, &h, &comp, 4);
+    if (!data) {
+        return NULL;
+    }
+    if (w <= 0 || h <= 0) {
+        stbi_image_free(data);
+        return NULL;
+    }
+
+    *out_w = w;
+    *out_h = h;
+    *out_channels = comp;
+    return data;
+}
+
+/**
  * Load an image from disk, decode to RGBA, and upload to an SDL GPU texture.
  *
- * Decodes pixel data using stb_image with 4 channels (RGBA32), creates an
- * SDL texture with linear scaling mode, and stores an owned copy of path.
- * On failure, out is zero-initialized and any intermediate allocations are freed.
+ * Decodes pixel data using stb_image with 4 channels (RGBA32) via
+ * decode_image_surface, creates an SDL texture with linear scaling mode,
+ * and stores an owned copy of path. On failure, out is zero-initialized
+ * and any intermediate allocations are freed.
  *
  * @param path Filesystem path to image file.
  * @param out Destination Image struct to receive texture, dimensions, and owned path.
@@ -528,12 +584,8 @@ bool viewer_load_image(const char *path, Image *out) {
     viewer_unload_image(out);
 
     int w = 0, h = 0, comp = 0;
-    unsigned char *data = stbi_load(path, &w, &h, &comp, 4);
+    unsigned char *data = decode_image_surface(path, &w, &h, &comp);
     if (!data) {
-        return false;
-    }
-    if (w <= 0 || h <= 0) {
-        stbi_image_free(data);
         return false;
     }
 
@@ -597,6 +649,23 @@ bool viewer_replace_image(int pane, const char *path) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Reset view scale and offsets to 1:1 pixel mapping (100% zoom, zero pan).
+ *
+ * Resets shared transform (g_zoom = 1.0f, g_pan_x = 0, g_pan_y = 0) and
+ * each pane's independent transform in g_free_zoom and g_free_pan.
+ */
+void viewer_reset_1to1(void) {
+    g_zoom = 1.0f;
+    g_pan_x = 0.0f;
+    g_pan_y = 0.0f;
+    for (int i = 0; i < 2; i++) {
+        g_free_zoom[i] = 1.0f;
+        g_free_pan_x[i] = 0.0f;
+        g_free_pan_y[i] = 0.0f;
+    }
+}
+
+/**
  * Fit loaded images within the current window or pane dimensions.
  *
  * Computes zoom factor such that images fit entirely inside their viewport
@@ -607,14 +676,7 @@ void viewer_fit_view(void) {
     if (g_count == 0) return;
 
     if (g_win_w <= 0 || g_win_h <= 0) {
-        g_zoom = 1.0f;
-        g_pan_x = 0.0f;
-        g_pan_y = 0.0f;
-        for (int i = 0; i < 2; i++) {
-            g_free_zoom[i] = 1.0f;
-            g_free_pan_x[i] = 0.0f;
-            g_free_pan_y[i] = 0.0f;
-        }
+        viewer_reset_1to1();
         return;
     }
 
@@ -926,7 +988,7 @@ bool viewer_go_parent(void) {
     g_file_list = NULL; g_file_count = 0; g_file_index = -1;
 
     char dummy[PATH_MAX];
-    if (!path_join(dummy, sizeof(dummy), parent, "dummy.jpg")) {
+    if (!viewer_path_join(dummy, sizeof(dummy), parent, "dummy.jpg")) {
         g_file_list = saved_list;
         g_file_count = saved_count;
         g_file_index = saved_index;

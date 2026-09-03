@@ -13,6 +13,7 @@
 #include <SDL2/SDL.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 
 static void make_dummy_png(const char *path) {
     unsigned char p[4] = {100, 150, 200, 255};
@@ -429,6 +430,59 @@ static void test_browser_filtering_performance(void) {
         unlink(path);
     }
     rmdir(base_dir);
+
+    // Multi-thousand entry benchmark (2,500 entries)
+    char multi_dir[] = "/tmp/civ_bperf_multi_XXXXXX";
+    char *md = mkdtemp(multi_dir);
+    TEST_ASSERT(md != NULL);
+    const int n_multi = 2500;
+    for (int i = 0; i < n_multi; i++) {
+        snprintf(path, sizeof(path), "%s/photo_archive_%04d.jpg", multi_dir, i);
+        int fd = creat(path, 0644);
+        if (fd >= 0) close(fd);
+    }
+
+    browser_set_root(multi_dir);
+    browser_toggle();
+    TEST_ASSERT(browser_is_open());
+
+    Uint64 t_m0 = SDL_GetPerformanceCounter();
+    double perf_freq = (double)SDL_GetPerformanceFrequency();
+
+    // Type filter "photo_archive_01"
+    const char *fstr = "photo_archive_01";
+    for (const char *fp = fstr; *fp; fp++) {
+        browser_filter_add_char(*fp);
+    }
+
+    for (int f = 0; f < 20; f++) {
+        browser_render(g_ren);
+        browser_handle_key(SDLK_DOWN, 0);
+    }
+
+    for (int b = 0; b < 3; b++) {
+        browser_handle_key(SDLK_BACKSPACE, 0);
+    }
+
+    for (int f = 0; f < 20; f++) {
+        browser_render(g_ren);
+        browser_handle_key(SDLK_UP, 0);
+    }
+
+    browser_clear_filter();
+
+    Uint64 t_m1 = SDL_GetPerformanceCounter();
+    double ms_multi = (double)(t_m1 - t_m0) * 1000.0 / perf_freq;
+    printf("    [Benchmark] Filter 2500 entries + 40 renders + navigation: %.2f ms\n", ms_multi);
+
+    browser_toggle();
+    browser_cleanup();
+
+    for (int i = 0; i < n_multi; i++) {
+        snprintf(path, sizeof(path), "%s/photo_archive_%04d.jpg", multi_dir, i);
+        unlink(path);
+    }
+    rmdir(multi_dir);
 }
 
 void run_browser_tests(void) {

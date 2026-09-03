@@ -120,6 +120,21 @@ extern char g_current_dir[PATH_MAX];
 // ---------------------------------------------------------------------------
 
 /**
+ * Safely join a directory path and filename into dst buffer.
+ *
+ * Handles root slashes, trailing slashes on dir, leading slashes on file,
+ * and enforces buffer bounds to prevent overflow. Returns true if the
+ * concatenated string fits in dst_size, false otherwise.
+ *
+ * @param dst Destination character buffer.
+ * @param dst_size Size of destination buffer in bytes.
+ * @param dir Directory path prefix.
+ * @param file Filename or relative path component.
+ * @return true if joined path fits in dst_size, false on truncation or null args.
+ */
+bool viewer_path_join(char *dst, size_t dst_size, const char *dir, const char *file);
+
+/**
  * Test whether a file name has a supported image extension.
  *
  * Performs case-insensitive matching against the list of supported extensions
@@ -258,6 +273,14 @@ bool viewer_replace_image(int pane, const char *path);
 // ---------------------------------------------------------------------------
 // View control
 // ---------------------------------------------------------------------------
+
+/**
+ * Reset view scale and offsets to 1:1 pixel mapping (100% zoom, zero pan).
+ *
+ * Resets shared transform (g_zoom = 1.0f, g_pan_x = 0, g_pan_y = 0) and
+ * each pane's independent transform in g_free_zoom and g_free_pan.
+ */
+void viewer_reset_1to1(void);
 
 /**
  * Fit loaded images within the current window or pane dimensions.
