@@ -141,6 +141,132 @@ void viewer_truncate_filename(const char *name, char *out, size_t out_sz, int ma
 }
 
 /**
+ * Format image color depth / channel configuration into a human-readable string.
+ *
+ * Maps standard STB channel counts (1, 2, 3, 4) to descriptive names (e.g.
+ * "24-bit RGB", "32-bit RGBA"), formats custom channel counts as "%d channels",
+ * and maps <= 0 to "Unknown".
+ *
+ * @param channels Number of color channels in source image.
+ * @param out Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ */
+void viewer_format_color_depth(int channels, char *out, size_t out_sz) {
+    if (!out || out_sz == 0) return;
+    if (channels <= 0) {
+        snprintf(out, out_sz, "Unknown");
+    } else if (channels == 1) {
+        snprintf(out, out_sz, "8-bit Grayscale");
+    } else if (channels == 2) {
+        snprintf(out, out_sz, "16-bit Gray+Alpha");
+    } else if (channels == 3) {
+        snprintf(out, out_sz, "24-bit RGB");
+    } else if (channels == 4) {
+        snprintf(out, out_sz, "32-bit RGBA");
+    } else {
+        snprintf(out, out_sz, "%d channels", channels);
+    }
+}
+
+/**
+ * Truncate a filesystem path to fit within max_chars by middle truncation.
+ *
+ * Preserves the basename and as much of the root/leading directory prefix as
+ * fits, inserting ".../" in between. If the basename itself exceeds max_chars,
+ * falls back to viewer_truncate_filename. If max_chars is very small (<= 5),
+ * outputs dots.
+ *
+ * @param path Input filesystem path.
+ * @param out Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ * @param max_chars Maximum allowable string length (excluding NUL).
+ */
+void viewer_truncate_path(const char *path, char *out, size_t out_sz, int max_chars) {
+    if (!out || out_sz == 0) return;
+    if (!path || max_chars <= 0) {
+        out[0] = '\0';
+        return;
+    }
+    if (max_chars >= (int)out_sz) {
+        max_chars = (int)out_sz - 1;
+    }
+    if (max_chars <= 0) {
+        out[0] = '\0';
+        return;
+    }
+
+    int path_len = (int)strlen(path);
+    if (path_len <= max_chars) {
+        snprintf(out, out_sz, "%s", path);
+        return;
+    }
+
+    if (max_chars <= 5) {
+        snprintf(out, out_sz, "%.*s", max_chars, ".....");
+        return;
+    }
+
+    const char *slash = strrchr(path, '/');
+    const char *filename = slash ? slash + 1 : path;
+    if (*filename == '\0') {
+        int prefix_len = max_chars - 3;
+        if (prefix_len > 0) {
+            snprintf(out, out_sz, "%.*s...", prefix_len, path);
+        } else {
+            snprintf(out, out_sz, "%.*s", max_chars, ".....");
+        }
+        out[out_sz - 1] = '\0';
+        if ((int)strlen(out) > max_chars) out[max_chars] = '\0';
+        return;
+    }
+
+    int filename_len = (int)strlen(filename);
+    if (filename_len > max_chars) {
+        viewer_truncate_filename(filename, out, out_sz, max_chars);
+        return;
+    }
+
+    int prefix_len = max_chars - (filename_len + 4);
+    if (prefix_len >= 1) {
+        snprintf(out, out_sz, "%.*s.../%.*s", prefix_len, path, filename_len, filename);
+    } else if (filename_len + 4 <= max_chars) {
+        snprintf(out, out_sz, ".../%.*s", filename_len, filename);
+    } else {
+        viewer_truncate_filename(filename, out, out_sz, max_chars);
+    }
+
+    out[out_sz - 1] = '\0';
+    if ((int)strlen(out) > max_chars) {
+        out[max_chars] = '\0';
+    }
+}
+
+/**
+ * Format file size in bytes into a human-readable string with byte count.
+ *
+ * Formats sizes into B, KB, MB, or GB with exact byte count appended in
+ * parentheses for values >= 1024. Formats negative values and 0 as "0 B".
+ *
+ * @param size File size in bytes (from stat st_size).
+ * @param out Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ */
+void viewer_format_file_size(off_t size, char *out, size_t out_sz) {
+    if (!out || out_sz == 0) return;
+    if (size <= 0) {
+        snprintf(out, out_sz, "0 B");
+    } else if (size < 1024) {
+        snprintf(out, out_sz, "%lld B", (long long)size);
+    } else if (size < 1024LL * 1024) {
+        snprintf(out, out_sz, "%.1f KB (%lld B)", (double)size / 1024.0, (long long)size);
+    } else if (size < 1024LL * 1024 * 1024) {
+        snprintf(out, out_sz, "%.1f MB (%lld B)", (double)size / (1024.0 * 1024.0), (long long)size);
+    } else {
+        snprintf(out, out_sz, "%.2f GB (%lld B)", (double)size / (1024.0 * 1024.0 * 1024.0), (long long)size);
+    }
+}
+
+/**
  * Test whether a file name has a supported image extension.
  *
  * Performs case-insensitive matching against the list of supported extensions
@@ -369,6 +495,7 @@ bool viewer_load_image(const char *path, Image *out) {
     out->tex = tex;
     out->w = w;
     out->h = h;
+    out->channels = comp;
     out->path = path_copy;
     return true;
 }
@@ -1187,10 +1314,11 @@ void viewer_toggle_metadata(void) {
 /**
  * Render right-side metadata panel (when g_show_metadata is true).
  *
- * Shows file system info (size, mtime, dimensions) and EXIF tags when
- * available. The panel is 380px wide, anchored to the right, with a
- * semi-transparent background and a header. Each metadata field is a
- * label/value pair drawn with the bitmap font.
+ * Shows file system info (dimensions, color format, size, mtime, path) and EXIF
+ * tags when available. The panel is 380px wide, anchored to the right, with a
+ * semi-transparent background and a header. Height is calculated to fit all
+ * active rows without footer overlap. Each metadata field is a label/value
+ * pair drawn with the bitmap font.
  */
 void viewer_render_metadata(SDL_Renderer *ren) {
     if (!g_show_metadata || !ren || g_win_w <= 0 || g_win_h <= 0) return;
@@ -1216,26 +1344,38 @@ void viewer_render_metadata(SDL_Renderer *ren) {
 
     struct stat st = s_cached_st;
     bool has_stat = s_has_stat;
-    char size_str[32] = "?";
+    char size_str[64] = "?";
     char mtime_str[64] = "?";
     if (has_stat) {
-        // Human readable size
-        if (st.st_size < 1024) snprintf(size_str, sizeof(size_str), "%ld B", (long)st.st_size);
-        else if (st.st_size < 1024*1024) snprintf(size_str, sizeof(size_str), "%.1f KB", st.st_size/1024.0);
-        else if (st.st_size < 1024*1024*1024) snprintf(size_str, sizeof(size_str), "%.1f MB", st.st_size/(1024.0*1024));
-        else snprintf(size_str, sizeof(size_str), "%.2f GB", st.st_size/(1024.0*1024*1024));
+        viewer_format_file_size(s_cached_st.st_size, size_str, sizeof(size_str));
         struct tm *tm = localtime(&st.st_mtime);
         if (tm) strftime(mtime_str, sizeof(mtime_str), "%Y-%m-%d %H:%M", tm);
     }
 
     ExifData exif = s_cached_exif;
 
-    // Panel geometry: 380px wide, 70% height centered vertically, right margin 12
+    int line_h = 14;
+    int exif_rows = 0;
+    if (!exif.has_exif) {
+        exif_rows = 1;
+    } else {
+        exif_rows = 1; // orientation
+        if (exif.make[0] || exif.model[0]) exif_rows++;
+        if (exif.datetime[0]) exif_rows++;
+        if (exif.software[0]) exif_rows++;
+        if (exif.iso) exif_rows++;
+        if (exif.exposure[0]) exif_rows++;
+        if (exif.fnumber[0]) exif_rows++;
+        if (exif.focal[0]) exif_rows++;
+        if (exif.exif_width && exif.exif_height) exif_rows++;
+    }
+
+    // Panel geometry: 380px wide, height calculated to fit file rows, EXIF rows, and footer
     int pw = 380;
     if (pw > g_win_w - 40) pw = g_win_w - 40;
     if (pw <= 0) return;
-    int ph = g_win_h - 80;
-    if (ph > 520) ph = 520;
+    int ph = 36 + (5 * line_h) + 26 + (exif_rows * line_h) + 12 + 20;
+    if (ph > g_win_h - 40) ph = g_win_h - 40;
     if (ph <= 0) return;
     int px = g_win_w - pw - 12;
     if (px < 0) px = 0;
@@ -1264,7 +1404,12 @@ void viewer_render_metadata(SDL_Renderer *ren) {
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
     char title[256];
-    snprintf(title, sizeof(title), "Metadata — %s", base);
+    if (g_count == 2) {
+        const char *pane_label = (pane == 0) ? "[Left Pane] " : "[Right Pane] ";
+        snprintf(title, sizeof(title), "Metadata %s— %s", pane_label, base);
+    } else {
+        snprintf(title, sizeof(title), "Metadata — %s", base);
+    }
     // Truncate title if too long
     int max_title = (pw - 16) / 8;
     if (max_title <= 0) {
@@ -1282,20 +1427,26 @@ void viewer_render_metadata(SDL_Renderer *ren) {
     text_draw(ren, px+8, py+9, title, title_col, 1);
 
     int y = py + 36;
-    int line_h = 14;
     int label_x = px + 12;
     int value_x = px + 120;
 
     // Helper macro to draw label/value pairs and advance y
     #define MD_ROW(label, value) do { \
-        text_draw(ren, label_x, y, label, label_col, 1); \
-        text_draw_clipped(ren, value_x, y, value, value_col, 1, pw - (value_x - px) - 12); \
+        if (y + line_h <= py + ph - 20) { \
+            text_draw(ren, label_x, y, label, label_col, 1); \
+            text_draw_clipped(ren, value_x, y, value, value_col, 1, pw - (value_x - px) - 12); \
+        } \
         y += line_h; \
     } while(0)
 
     char dim[64];
     snprintf(dim, sizeof(dim), "%d x %d", im->w, im->h);
     MD_ROW("Dimensions", dim);
+
+    char color_str[32];
+    viewer_format_color_depth(im->channels, color_str, sizeof(color_str));
+    MD_ROW("Format", color_str);
+
     MD_ROW("File size", size_str);
     MD_ROW("Modified", mtime_str);
     // Path (show full, truncated)
@@ -1311,18 +1462,27 @@ void viewer_render_metadata(SDL_Renderer *ren) {
             snprintf(path_disp, sizeof(path_disp), "%s", tmp);
         }
     }
-    MD_ROW("Path", path_disp);
+    int max_path_chars = (pw - (value_x - px) - 12) / 8;
+    char trunc_path[PATH_MAX];
+    viewer_truncate_path(path_disp, trunc_path, sizeof(trunc_path), max_path_chars);
+    MD_ROW("Path", trunc_path);
 
     y += 4;
     // Separator
-    SDL_SetRenderDrawColor(ren, 50, 50, 50, 255);
-    SDL_RenderDrawLine(ren, px+12, y, px+pw-12, y);
+    if (y <= py + ph - 20) {
+        SDL_SetRenderDrawColor(ren, 50, 50, 50, 255);
+        SDL_RenderDrawLine(ren, px+12, y, px+pw-12, y);
+    }
     y += 8;
-    text_draw(ren, label_x, y, "EXIF", label_col, 1);
+    if (y + line_h <= py + ph - 20) {
+        text_draw(ren, label_x, y, "EXIF", label_col, 1);
+    }
     y += line_h;
 
     if (!exif.has_exif) {
-        text_draw(ren, label_x, y, "No EXIF data", dim_col, 1);
+        if (y + line_h <= py + ph - 20) {
+            text_draw(ren, label_x, y, "No EXIF data", dim_col, 1);
+        }
         y += line_h;
     } else {
         if (exif.make[0] || exif.model[0]) {

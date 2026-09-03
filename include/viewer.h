@@ -16,6 +16,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <limits.h>
+#include <sys/types.h>
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
@@ -64,6 +65,7 @@ typedef struct {
 typedef struct {
     SDL_Texture *tex;  // GPU texture, owned
     int w, h;          // Original image dimensions in pixels
+    int channels;      // Original decoded channel count (1=Gray, 2=Gray+Alpha, 3=RGB, 4=RGBA)
     char *path;        // Owned heap-allocated file path
 } Image;
 
@@ -117,6 +119,46 @@ bool viewer_is_image_file(const char *name);
  * If there is no extension or it is too long, suffix truncation is applied.
  */
 void viewer_truncate_filename(const char *name, char *out, size_t out_sz, int max_len);
+
+/**
+ * Format image color depth / channel configuration into a human-readable string.
+ *
+ * Maps standard STB channel counts (1, 2, 3, 4) to descriptive names (e.g.
+ * "24-bit RGB", "32-bit RGBA"), formats custom channel counts as "%d channels",
+ * and maps <= 0 to "Unknown".
+ *
+ * @param channels Number of color channels in source image.
+ * @param out Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ */
+void viewer_format_color_depth(int channels, char *out, size_t out_sz);
+
+/**
+ * Truncate a filesystem path to fit within max_chars by middle truncation.
+ *
+ * Preserves the basename and as much of the root/leading directory prefix as
+ * fits, inserting ".../" in between. If the basename itself exceeds max_chars,
+ * falls back to viewer_truncate_filename. If max_chars is very small (<= 5),
+ * outputs dots.
+ *
+ * @param path Input filesystem path.
+ * @param out Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ * @param max_chars Maximum allowable string length (excluding NUL).
+ */
+void viewer_truncate_path(const char *path, char *out, size_t out_sz, int max_chars);
+
+/**
+ * Format file size in bytes into a human-readable string with byte count.
+ *
+ * Formats sizes into B, KB, MB, or GB with exact byte count appended in
+ * parentheses for values >= 1024. Formats negative values and 0 as "0 B".
+ *
+ * @param size File size in bytes (from stat st_size).
+ * @param out Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ */
+void viewer_format_file_size(off_t size, char *out, size_t out_sz);
 
 /**
  * Validate that a path is a safe, readable regular file with an image extension.

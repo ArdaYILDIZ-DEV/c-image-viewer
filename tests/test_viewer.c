@@ -98,6 +98,163 @@ static void test_viewer_truncate_filename(void) {
     TEST_ASSERT_INT_EQ((int)strlen(out), 10);
 }
 
+static void test_viewer_format_color_depth(void) {
+    char buf[64];
+
+    viewer_format_color_depth(1, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "8-bit Grayscale");
+
+    viewer_format_color_depth(2, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "16-bit Gray+Alpha");
+
+    viewer_format_color_depth(3, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "24-bit RGB");
+
+    viewer_format_color_depth(4, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "32-bit RGBA");
+
+    viewer_format_color_depth(0, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "Unknown");
+
+    viewer_format_color_depth(-1, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "Unknown");
+
+    viewer_format_color_depth(5, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "5 channels");
+
+    // Small out_sz buffer truncation safety
+    char small[6];
+    viewer_format_color_depth(3, small, sizeof(small));
+    TEST_ASSERT_STR_EQ(small, "24-bi");
+    TEST_ASSERT_INT_EQ((int)strlen(small), 5);
+
+    // NULL and 0 out_sz guards
+    viewer_format_color_depth(3, NULL, 0);
+    viewer_format_color_depth(3, buf, 0);
+}
+
+static void test_viewer_truncate_path(void) {
+    char buf[128];
+    const char *nested = "/home/user/very/long/nested/path/to/my_image.png";
+
+    // Short path
+    viewer_truncate_path("/short/path.jpg", buf, sizeof(buf), 30);
+    TEST_ASSERT_STR_EQ(buf, "/short/path.jpg");
+
+    // Exact fit
+    int nested_len = (int)strlen(nested);
+    viewer_truncate_path(nested, buf, sizeof(buf), nested_len);
+    TEST_ASSERT_STR_EQ(buf, nested);
+
+    // Deeply nested path with room for prefix + .../ + filename
+    viewer_truncate_path(nested, buf, sizeof(buf), 30);
+    TEST_ASSERT_INT_EQ((int)strlen(buf), 30);
+    TEST_ASSERT(strncmp(buf, "/home/user/ver", 14) == 0);
+    TEST_ASSERT(strstr(buf, ".../my_image.png") != NULL);
+
+    // Deeply nested path with room only for .../ + filename (16 chars)
+    viewer_truncate_path(nested, buf, sizeof(buf), 16);
+    TEST_ASSERT_STR_EQ(buf, ".../my_image.png");
+    TEST_ASSERT_INT_EQ((int)strlen(buf), 16);
+
+    // Deeply nested path when max_chars cannot fit .../ + filename
+    viewer_truncate_path(nested, buf, sizeof(buf), 10);
+    TEST_ASSERT_INT_EQ((int)strlen(buf), 10);
+    TEST_ASSERT(strstr(buf, "...png") != NULL);
+
+    // Path without slash
+    viewer_truncate_path("single_image.jpg", buf, sizeof(buf), 20);
+    TEST_ASSERT_STR_EQ(buf, "single_image.jpg");
+
+    viewer_truncate_path("single_image.jpg", buf, sizeof(buf), 10);
+    TEST_ASSERT_INT_EQ((int)strlen(buf), 10);
+    TEST_ASSERT_STR_EQ(buf, "sing...jpg");
+
+    // Edge cases: NULL, out_sz == 0, max_chars <= 0
+    buf[0] = 'x';
+    viewer_truncate_path(NULL, buf, sizeof(buf), 10);
+    TEST_ASSERT_STR_EQ(buf, "");
+
+    viewer_truncate_path(nested, NULL, 0, 10);
+    viewer_truncate_path(nested, buf, 0, 10);
+
+    buf[0] = 'x';
+    viewer_truncate_path(nested, buf, sizeof(buf), 0);
+    TEST_ASSERT_STR_EQ(buf, "");
+
+    buf[0] = 'x';
+    viewer_truncate_path(nested, buf, sizeof(buf), -5);
+    TEST_ASSERT_STR_EQ(buf, "");
+
+    // Small max_chars (<= 5)
+    viewer_truncate_path(nested, buf, sizeof(buf), 5);
+    TEST_ASSERT_STR_EQ(buf, ".....");
+    TEST_ASSERT_INT_EQ((int)strlen(buf), 5);
+
+    viewer_truncate_path(nested, buf, sizeof(buf), 3);
+    TEST_ASSERT_STR_EQ(buf, "...");
+    TEST_ASSERT_INT_EQ((int)strlen(buf), 3);
+
+    viewer_truncate_path(nested, buf, sizeof(buf), 1);
+    TEST_ASSERT_STR_EQ(buf, ".");
+    TEST_ASSERT_INT_EQ((int)strlen(buf), 1);
+
+    // Small buffer safety
+    char tiny[6];
+    viewer_truncate_path(nested, tiny, sizeof(tiny), 20);
+    TEST_ASSERT((int)strlen(tiny) <= 5);
+
+    // Invariant check: output length must NEVER exceed max_chars
+    for (int mc = 1; mc <= 60; mc++) {
+        char check_buf[128];
+        viewer_truncate_path(nested, check_buf, sizeof(check_buf), mc);
+        TEST_ASSERT((int)strlen(check_buf) <= mc);
+
+        viewer_truncate_path("single_image.jpg", check_buf, sizeof(check_buf), mc);
+        TEST_ASSERT((int)strlen(check_buf) <= mc);
+    }
+}
+
+static void test_viewer_format_file_size(void) {
+    char buf[64];
+
+    viewer_format_file_size(0, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "0 B");
+
+    viewer_format_file_size(500, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "500 B");
+
+    viewer_format_file_size(1024, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "1.0 KB (1024 B)");
+
+    viewer_format_file_size(2048, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "2.0 KB (2048 B)");
+
+    viewer_format_file_size(10485760, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "10.0 MB (10485760 B)");
+
+    // Negative size formats as 0 B
+    viewer_format_file_size(-1, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "0 B");
+
+    viewer_format_file_size(-1024, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "0 B");
+
+    // Gigabytes range
+    viewer_format_file_size(3221225472LL, buf, sizeof(buf));
+    TEST_ASSERT_STR_EQ(buf, "3.00 GB (3221225472 B)");
+
+    // Small buffer truncation safety
+    char small[6];
+    viewer_format_file_size(2048, small, sizeof(small));
+    TEST_ASSERT_STR_EQ(small, "2.0 K");
+    TEST_ASSERT_INT_EQ((int)strlen(small), 5);
+
+    // NULL and 0 out_sz guards
+    viewer_format_file_size(1024, NULL, 0);
+    viewer_format_file_size(1024, buf, 0);
+}
+
 static void test_viewer_is_image_file(void) {
     TEST_ASSERT(viewer_is_image_file("photo.jpg"));
     TEST_ASSERT(viewer_is_image_file("PHOTO.JPG"));
@@ -189,12 +346,14 @@ static void test_viewer_load_unload(void) {
     TEST_ASSERT(img.tex != NULL);
     TEST_ASSERT_INT_EQ(img.w, 16);
     TEST_ASSERT_INT_EQ(img.h, 16);
+    TEST_ASSERT_INT_EQ(img.channels, 4);
     TEST_ASSERT(img.path != NULL);
 
     viewer_unload_image(&img);
     TEST_ASSERT(img.tex == NULL);
     TEST_ASSERT(img.path == NULL);
     TEST_ASSERT_INT_EQ(img.w, 0);
+    TEST_ASSERT_INT_EQ(img.channels, 0);
 
     unlink(tmp_img);
 }
@@ -636,6 +795,19 @@ static void test_viewer_culling_and_metadata_render(void) {
     viewer_do_pan(100000, 0);
     viewer_render(g_ren);
 
+    // 5. Dual pane metadata rendering (left pane, right pane, sync)
+    viewer_toggle_metadata();
+    TEST_ASSERT(g_show_metadata);
+    g_sync = false;
+    g_active = 0;
+    viewer_render_metadata(g_ren);
+    g_active = 1;
+    viewer_render_metadata(g_ren);
+    g_sync = true;
+    viewer_render_metadata(g_ren);
+    viewer_toggle_metadata();
+    TEST_ASSERT(!g_show_metadata);
+
     viewer_unload_image(&g_img[0]);
     viewer_unload_image(&g_img[1]);
     g_count = 0;
@@ -919,6 +1091,9 @@ void run_viewer_tests(void) {
     printf("--- Viewer Test Suite ---\n");
     TEST_RUN(test_viewer_is_image_file);
     TEST_RUN(test_viewer_truncate_filename);
+    TEST_RUN(test_viewer_format_color_depth);
+    TEST_RUN(test_viewer_truncate_path);
+    TEST_RUN(test_viewer_format_file_size);
     TEST_RUN(test_viewer_distribute_dual_budget);
     TEST_RUN(test_viewer_calc_status_layout_single);
     TEST_RUN(test_viewer_calc_status_layout_dual);
