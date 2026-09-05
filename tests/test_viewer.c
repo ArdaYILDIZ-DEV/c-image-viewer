@@ -3123,6 +3123,344 @@ static void test_viewer_async_decoding(void) {
     g_active = orig_active;
 }
 
+/**
+ * Test dual-pane zoom cursor anchoring, world-point invariance, and boundary conditions.
+ *
+ * Verifies that:
+ * 1. Zooming centered on pane 0 or pane 1 midpoint leaves pan offsets unchanged.
+ * 2. Off-center zooming preserves world-point coordinates under cursor across
+ *    zoom changes for both panes in sync mode.
+ * 3. Exact integer division boundary conditions hold for odd window dimensions (g_win_w = 801).
+ * 4. Divider boundary pixels (mx == mid and mx == mid - 1) anchor to the correct pane.
+ * 5. Free mode dual-pane cursor-anchored zoom preserves world-point invariance on
+ *    the active pane while leaving the inactive pane unchanged.
+ */
+static void test_viewer_dual_pane_sync_zoom_cursor_anchor(void) {
+    int orig_win_w = g_win_w;
+    int orig_win_h = g_win_h;
+    int orig_count = g_count;
+    bool orig_sync = g_sync;
+    int orig_active = g_active;
+    float orig_zoom = g_zoom;
+    float orig_pan_x = g_pan_x;
+    float orig_pan_y = g_pan_y;
+    float orig_fz[2] = { g_free_zoom[0], g_free_zoom[1] };
+    float orig_fpx[2] = { g_free_pan_x[0], g_free_pan_x[1] };
+    float orig_fpy[2] = { g_free_pan_y[0], g_free_pan_y[1] };
+
+    g_count = 2;
+    g_sync = true;
+
+    // --- Section 1: Even window width (800x600) ---
+    g_win_w = 800;
+    g_win_h = 600;
+    int mid = g_win_w / 2;
+    float pane0_cx = (float)mid * 0.5f;
+    float pane1_cx = (float)mid + (float)(g_win_w - mid) * 0.5f;
+    float pane_cy = (float)g_win_h * 0.5f;
+
+    // Zooming at pane 0 center does not shift g_pan_x or g_pan_y
+    g_zoom = 1.0f;
+    g_pan_x = 42.0f;
+    g_pan_y = -17.0f;
+    viewer_do_zoom(1.5f, (int)pane0_cx, (int)pane_cy);
+    TEST_ASSERT(fabsf(g_pan_x - 42.0f) < 1e-5f);
+    TEST_ASSERT(fabsf(g_pan_y - (-17.0f)) < 1e-5f);
+
+    // Zooming at pane 1 center does not shift g_pan_x or g_pan_y
+    g_zoom = 1.0f;
+    g_pan_x = -25.0f;
+    g_pan_y = 60.0f;
+    viewer_do_zoom(0.8f, (int)pane1_cx, (int)pane_cy);
+    TEST_ASSERT(fabsf(g_pan_x - (-25.0f)) < 1e-5f);
+    TEST_ASSERT(fabsf(g_pan_y - 60.0f) < 1e-5f);
+
+    // Zooming at off-center cursor position in pane 0 maintains world point invariance
+    {
+        int mx = 120;
+        int my = 180;
+        g_zoom = 1.0f;
+        g_pan_x = 10.0f;
+        g_pan_y = 5.0f;
+        float wx_before = ((float)mx - pane0_cx) / g_zoom - g_pan_x;
+        float wy_before = ((float)my - pane_cy) / g_zoom - g_pan_y;
+
+        viewer_do_zoom(1.4f, mx, my);
+        float wx_after = ((float)mx - pane0_cx) / g_zoom - g_pan_x;
+        float wy_after = ((float)my - pane_cy) / g_zoom - g_pan_y;
+        TEST_ASSERT(fabsf(wx_before - wx_after) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after) < 1e-4f);
+
+        viewer_do_zoom(0.7f, mx, my);
+        float wx_after2 = ((float)mx - pane0_cx) / g_zoom - g_pan_x;
+        float wy_after2 = ((float)my - pane_cy) / g_zoom - g_pan_y;
+        TEST_ASSERT(fabsf(wx_before - wx_after2) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after2) < 1e-4f);
+    }
+
+    // Zooming at off-center cursor position in pane 1 maintains world point invariance
+    {
+        int mx = 550;
+        int my = 420;
+        g_zoom = 1.0f;
+        g_pan_x = -15.0f;
+        g_pan_y = 20.0f;
+        float wx_before = ((float)mx - pane1_cx) / g_zoom - g_pan_x;
+        float wy_before = ((float)my - pane_cy) / g_zoom - g_pan_y;
+
+        viewer_do_zoom(1.3f, mx, my);
+        float wx_after = ((float)mx - pane1_cx) / g_zoom - g_pan_x;
+        float wy_after = ((float)my - pane_cy) / g_zoom - g_pan_y;
+        TEST_ASSERT(fabsf(wx_before - wx_after) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after) < 1e-4f);
+
+        viewer_do_zoom(0.65f, mx, my);
+        float wx_after2 = ((float)mx - pane1_cx) / g_zoom - g_pan_x;
+        float wy_after2 = ((float)my - pane_cy) / g_zoom - g_pan_y;
+        TEST_ASSERT(fabsf(wx_before - wx_after2) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after2) < 1e-4f);
+    }
+
+    // --- Section 2: Odd window width (801x600) ---
+    g_win_w = 801;
+    g_win_h = 600;
+    mid = g_win_w / 2;
+    pane0_cx = (float)mid * 0.5f;
+    pane1_cx = (float)mid + (float)(g_win_w - mid) * 0.5f;
+    pane_cy = (float)g_win_h * 0.5f;
+
+    // Zooming at pane 0 center with odd window width does not shift g_pan_x or g_pan_y
+    g_zoom = 2.0f;
+    g_pan_x = 30.0f;
+    g_pan_y = -50.0f;
+    viewer_do_zoom(1.25f, (int)pane0_cx, (int)pane_cy);
+    TEST_ASSERT(fabsf(g_pan_x - 30.0f) < 1e-5f);
+    TEST_ASSERT(fabsf(g_pan_y - (-50.0f)) < 1e-5f);
+
+    // Zooming at off-center cursor position in pane 0 with odd window width
+    {
+        int mx = 180;
+        int my = 220;
+        g_zoom = 1.5f;
+        g_pan_x = 12.0f;
+        g_pan_y = -8.0f;
+        float wx_before = ((float)mx - pane0_cx) / g_zoom - g_pan_x;
+        float wy_before = ((float)my - pane_cy) / g_zoom - g_pan_y;
+
+        viewer_do_zoom(1.2f, mx, my);
+        float wx_after = ((float)mx - pane0_cx) / g_zoom - g_pan_x;
+        float wy_after = ((float)my - pane_cy) / g_zoom - g_pan_y;
+        TEST_ASSERT(fabsf(wx_before - wx_after) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after) < 1e-4f);
+    }
+
+    // Zooming at off-center cursor position in pane 1 with odd window width
+    {
+        int mx = 650;
+        int my = 350;
+        g_zoom = 1.5f;
+        g_pan_x = -20.0f;
+        g_pan_y = 15.0f;
+        float wx_before = ((float)mx - pane1_cx) / g_zoom - g_pan_x;
+        float wy_before = ((float)my - pane_cy) / g_zoom - g_pan_y;
+
+        viewer_do_zoom(1.35f, mx, my);
+        float wx_after = ((float)mx - pane1_cx) / g_zoom - g_pan_x;
+        float wy_after = ((float)my - pane_cy) / g_zoom - g_pan_y;
+        TEST_ASSERT(fabsf(wx_before - wx_after) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after) < 1e-4f);
+
+        viewer_do_zoom(0.8f, mx, my);
+        float wx_after2 = ((float)mx - pane1_cx) / g_zoom - g_pan_x;
+        float wy_after2 = ((float)my - pane_cy) / g_zoom - g_pan_y;
+        TEST_ASSERT(fabsf(wx_before - wx_after2) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after2) < 1e-4f);
+    }
+
+    // --- Section 3: Divider boundary pixels in sync mode (mx == mid and mx == mid - 1) ---
+    g_win_w = 800;
+    g_win_h = 600;
+    mid = g_win_w / 2;
+    pane0_cx = (float)mid * 0.5f;
+    pane1_cx = (float)mid + (float)(g_win_w - mid) * 0.5f;
+    pane_cy = (float)g_win_h * 0.5f;
+
+    // mx == mid - 1 anchors to pane 0
+    {
+        int mx = mid - 1;
+        int my = 300;
+        g_zoom = 1.0f;
+        g_pan_x = 0.0f;
+        g_pan_y = 0.0f;
+        float wx_before = ((float)mx - pane0_cx) / g_zoom - g_pan_x;
+        float wy_before = ((float)my - pane_cy) / g_zoom - g_pan_y;
+
+        viewer_do_zoom(1.25f, mx, my);
+        float wx_after = ((float)mx - pane0_cx) / g_zoom - g_pan_x;
+        float wy_after = ((float)my - pane_cy) / g_zoom - g_pan_y;
+        TEST_ASSERT(fabsf(wx_before - wx_after) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after) < 1e-4f);
+    }
+
+    // mx == mid anchors to pane 1
+    {
+        int mx = mid;
+        int my = 300;
+        g_zoom = 1.0f;
+        g_pan_x = 0.0f;
+        g_pan_y = 0.0f;
+        float wx_before = ((float)mx - pane1_cx) / g_zoom - g_pan_x;
+        float wy_before = ((float)my - pane_cy) / g_zoom - g_pan_y;
+
+        viewer_do_zoom(0.85f, mx, my);
+        float wx_after = ((float)mx - pane1_cx) / g_zoom - g_pan_x;
+        float wy_after = ((float)my - pane_cy) / g_zoom - g_pan_y;
+        TEST_ASSERT(fabsf(wx_before - wx_after) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after) < 1e-4f);
+    }
+
+    // Divider boundary pixels with odd window width (801x600)
+    {
+        g_win_w = 801;
+        mid = g_win_w / 2;
+        pane0_cx = (float)mid * 0.5f;
+        pane1_cx = (float)mid + (float)(g_win_w - mid) * 0.5f;
+
+        // mx == mid - 1 in pane 0
+        int mx0 = mid - 1;
+        int my0 = 250;
+        g_zoom = 1.5f;
+        g_pan_x = 5.0f;
+        g_pan_y = -10.0f;
+        float wx0_before = ((float)mx0 - pane0_cx) / g_zoom - g_pan_x;
+        viewer_do_zoom(1.2f, mx0, my0);
+        float wx0_after = ((float)mx0 - pane0_cx) / g_zoom - g_pan_x;
+        TEST_ASSERT(fabsf(wx0_before - wx0_after) < 1e-4f);
+
+        // mx == mid in pane 1
+        int mx1 = mid;
+        int my1 = 250;
+        float wx1_before = ((float)mx1 - pane1_cx) / g_zoom - g_pan_x;
+        viewer_do_zoom(0.8f, mx1, my1);
+        float wx1_after = ((float)mx1 - pane1_cx) / g_zoom - g_pan_x;
+        TEST_ASSERT(fabsf(wx1_before - wx1_after) < 1e-4f);
+    }
+
+    // --- Section 4: Free mode dual-pane cursor-anchored zoom invariance (g_sync = false) ---
+    g_sync = false;
+    g_win_w = 800;
+    g_win_h = 600;
+    mid = g_win_w / 2;
+    pane0_cx = (float)mid * 0.5f;
+    pane1_cx = (float)mid + (float)(g_win_w - mid) * 0.5f;
+    pane_cy = (float)g_win_h * 0.5f;
+
+    // Active pane 0: off-center cursor invariance and inactive pane isolation
+    {
+        g_active = 0;
+        g_free_zoom[0] = 1.0f;
+        g_free_pan_x[0] = 15.0f;
+        g_free_pan_y[0] = -25.0f;
+        g_free_zoom[1] = 2.5f;
+        g_free_pan_x[1] = 80.0f;
+        g_free_pan_y[1] = -40.0f;
+
+        int mx = 140;
+        int my = 220;
+        float wx_before = ((float)mx - pane0_cx) / g_free_zoom[0] - g_free_pan_x[0];
+        float wy_before = ((float)my - pane_cy) / g_free_zoom[0] - g_free_pan_y[0];
+
+        viewer_do_zoom(1.3f, mx, my);
+        float wx_after = ((float)mx - pane0_cx) / g_free_zoom[0] - g_free_pan_x[0];
+        float wy_after = ((float)my - pane_cy) / g_free_zoom[0] - g_free_pan_y[0];
+        TEST_ASSERT(fabsf(wx_before - wx_after) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after) < 1e-4f);
+
+        // Inactive pane 1 must remain completely unaffected
+        TEST_ASSERT(fabsf(g_free_zoom[1] - 2.5f) < 1e-5f);
+        TEST_ASSERT(fabsf(g_free_pan_x[1] - 80.0f) < 1e-5f);
+        TEST_ASSERT(fabsf(g_free_pan_y[1] - (-40.0f)) < 1e-5f);
+
+        // Boundary pixel mx == mid - 1 in active pane 0
+        mx = mid - 1;
+        wx_before = ((float)mx - pane0_cx) / g_free_zoom[0] - g_free_pan_x[0];
+        viewer_do_zoom(0.8f, mx, my);
+        wx_after = ((float)mx - pane0_cx) / g_free_zoom[0] - g_free_pan_x[0];
+        TEST_ASSERT(fabsf(wx_before - wx_after) < 1e-4f);
+    }
+
+    // Active pane 1: off-center cursor invariance and boundary pixel mx == mid
+    {
+        g_active = 1;
+        g_free_zoom[1] = 1.0f;
+        g_free_pan_x[1] = -30.0f;
+        g_free_pan_y[1] = 45.0f;
+        float saved_z0 = g_free_zoom[0];
+        float saved_px0 = g_free_pan_x[0];
+        float saved_py0 = g_free_pan_y[0];
+
+        int mx = 580;
+        int my = 360;
+        float wx_before = ((float)mx - pane1_cx) / g_free_zoom[1] - g_free_pan_x[1];
+        float wy_before = ((float)my - pane_cy) / g_free_zoom[1] - g_free_pan_y[1];
+
+        viewer_do_zoom(1.4f, mx, my);
+        float wx_after = ((float)mx - pane1_cx) / g_free_zoom[1] - g_free_pan_x[1];
+        float wy_after = ((float)my - pane_cy) / g_free_zoom[1] - g_free_pan_y[1];
+        TEST_ASSERT(fabsf(wx_before - wx_after) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after) < 1e-4f);
+
+        // Boundary pixel mx == mid in active pane 1
+        mx = mid;
+        wx_before = ((float)mx - pane1_cx) / g_free_zoom[1] - g_free_pan_x[1];
+        viewer_do_zoom(0.75f, mx, my);
+        wx_after = ((float)mx - pane1_cx) / g_free_zoom[1] - g_free_pan_x[1];
+        TEST_ASSERT(fabsf(wx_before - wx_after) < 1e-4f);
+
+        // Inactive pane 0 must remain completely unaffected
+        TEST_ASSERT(fabsf(g_free_zoom[0] - saved_z0) < 1e-5f);
+        TEST_ASSERT(fabsf(g_free_pan_x[0] - saved_px0) < 1e-5f);
+        TEST_ASSERT(fabsf(g_free_pan_y[0] - saved_py0) < 1e-5f);
+    }
+
+    // Active pane 1 with odd window width (801x600)
+    {
+        g_win_w = 801;
+        mid = g_win_w / 2;
+        pane1_cx = (float)mid + (float)(g_win_w - mid) * 0.5f;
+        g_active = 1;
+        g_free_zoom[1] = 1.5f;
+        g_free_pan_x[1] = 10.0f;
+        g_free_pan_y[1] = -15.0f;
+
+        int mx = mid;
+        int my = 310;
+        float wx_before = ((float)mx - pane1_cx) / g_free_zoom[1] - g_free_pan_x[1];
+        float wy_before = ((float)my - pane_cy) / g_free_zoom[1] - g_free_pan_y[1];
+
+        viewer_do_zoom(1.25f, mx, my);
+        float wx_after = ((float)mx - pane1_cx) / g_free_zoom[1] - g_free_pan_x[1];
+        float wy_after = ((float)my - pane_cy) / g_free_zoom[1] - g_free_pan_y[1];
+        TEST_ASSERT(fabsf(wx_before - wx_after) < 1e-4f);
+        TEST_ASSERT(fabsf(wy_before - wy_after) < 1e-4f);
+    }
+
+    // Restore state
+    g_win_w = orig_win_w;
+    g_win_h = orig_win_h;
+    g_count = orig_count;
+    g_sync = orig_sync;
+    g_active = orig_active;
+    g_zoom = orig_zoom;
+    g_pan_x = orig_pan_x;
+    g_pan_y = orig_pan_y;
+    for (int i = 0; i < 2; i++) {
+        g_free_zoom[i] = orig_fz[i];
+        g_free_pan_x[i] = orig_fpx[i];
+        g_free_pan_y[i] = orig_fpy[i];
+    }
+}
+
 void run_viewer_tests(void) {
     printf("--- Viewer Test Suite ---\n");
     TEST_RUN(test_viewer_is_image_file);
@@ -3147,6 +3485,7 @@ void run_viewer_tests(void) {
     TEST_RUN(test_viewer_degenerate_window_and_fit);
     TEST_RUN(test_viewer_navigate_corrupt_file_skipping);
     TEST_RUN(test_viewer_dual_pane_boundary_cases);
+    TEST_RUN(test_viewer_dual_pane_sync_zoom_cursor_anchor);
     TEST_RUN(test_viewer_culling_and_metadata_render);
     TEST_RUN(test_viewer_metadata_cache_stress);
     TEST_RUN(test_viewer_repeated_load_unload_cycles);

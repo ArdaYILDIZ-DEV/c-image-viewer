@@ -164,7 +164,21 @@ static void handle_keydown(SDL_Keycode key, SDL_Keymod mod, bool *running, bool 
     case SDLK_MINUS:
     case SDLK_KP_MINUS: {
         float f = (key == SDLK_MINUS || key == SDLK_KP_MINUS) ? 0.9f : 1.1f;
-        viewer_do_zoom(f, g_win_w / 2, g_win_h / 2);
+        int mx, my;
+        SDL_GetMouseState(&mx, &my);
+        bool mouse_out = (mx < 0 || mx >= g_win_w || my < 0 || my >= g_win_h);
+        bool hover_inactive = (!g_sync && g_count == 2 &&
+            ((g_active == 0 && mx >= g_win_w / 2) || (g_active == 1 && mx < g_win_w / 2)));
+        if (mouse_out || hover_inactive) {
+            if (g_count == 2) {
+                int mid = g_win_w / 2;
+                mx = (g_active == 0) ? (mid / 2) : (mid + (g_win_w - mid) / 2);
+            } else {
+                mx = g_win_w / 2;
+            }
+            my = g_win_h / 2;
+        }
+        viewer_do_zoom(f, mx, my);
         need_title = true;
         break;
     }

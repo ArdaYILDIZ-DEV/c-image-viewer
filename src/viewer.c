@@ -1034,10 +1034,16 @@ void viewer_do_zoom(float factor, int mx, int my) {
         if (next < 0.05f) next = 0.05f;
         if (next > 32.0f) next = 32.0f;
         if (next == old) return;
-        float cx = (float)g_win_w * 0.5f;
-        float cy = (float)g_win_h * 0.5f;
-        g_pan_x += (float)(mx - (int)cx) * (1.0f / next - 1.0f / old);
-        g_pan_y += (float)(my - (int)cy) * (1.0f / next - 1.0f / old);
+        float pane_cx;
+        if (g_count == 2) {
+            int mid = g_win_w / 2;
+            pane_cx = (mx < mid) ? ((float)mid * 0.5f) : ((float)mid + (float)(g_win_w - mid) * 0.5f);
+        } else {
+            pane_cx = (float)g_win_w * 0.5f;
+        }
+        float pane_cy = (float)g_win_h * 0.5f;
+        g_pan_x += ((float)mx - pane_cx) * (1.0f / next - 1.0f / old);
+        g_pan_y += ((float)my - pane_cy) * (1.0f / next - 1.0f / old);
         g_zoom = next;
         for (int i = 0; i < 2; i++) {
             g_free_zoom[i] = g_zoom;
@@ -1052,12 +1058,16 @@ void viewer_do_zoom(float factor, int mx, int my) {
         if (next < 0.05f) next = 0.05f;
         if (next > 32.0f) next = 32.0f;
         if (next == old) return;
-        float pane_w = (g_count == 1) ? (float)g_win_w : (float)g_win_w / 2.0f;
-        float pane_cx = (g_count == 1) ? (float)g_win_w * 0.5f
-                        : (p == 0 ? pane_w * 0.5f : pane_w + pane_w * 0.5f);
+        float pane_cx;
+        if (g_count == 2) {
+            int mid = g_win_w / 2;
+            pane_cx = (p == 0) ? ((float)mid * 0.5f) : ((float)mid + (float)(g_win_w - mid) * 0.5f);
+        } else {
+            pane_cx = (float)g_win_w * 0.5f;
+        }
         float pane_cy = (float)g_win_h * 0.5f;
-        g_free_pan_x[p] += (float)(mx - (int)pane_cx) * (1.0f / next - 1.0f / old);
-        g_free_pan_y[p] += (float)(my - (int)pane_cy) * (1.0f / next - 1.0f / old);
+        g_free_pan_x[p] += ((float)mx - pane_cx) * (1.0f / next - 1.0f / old);
+        g_free_pan_y[p] += ((float)my - pane_cy) * (1.0f / next - 1.0f / old);
         g_free_zoom[p] = next;
     }
 }
