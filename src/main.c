@@ -226,6 +226,7 @@ static void app_set_window_icon(SDL_Window *win) {
  * Free all global resources, close browser and viewer allocations, and shut down SDL.
  */
 static void app_cleanup(void) {
+    viewer_cleanup_async();
     browser_cleanup();
     viewer_free_file_list();
     for (int i = 0; i < g_count; i++) viewer_unload_image(&g_img[i]);
@@ -294,30 +295,65 @@ int main(int argc, char *argv[]) {
     }
     SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_BLEND);
 
-    // Load initial images; failure is fatal to avoid partial comparison.
+    // Validate image paths and initiate asynchronous decoding.
+    char first_clean[PATH_MAX] = {0};
     for (int i = 0; i < g_count; i++) {
         char clean[PATH_MAX];
         if (!viewer_validate_image_path(argv[i + 1], clean, sizeof(clean)) ||
-            !viewer_load_image(clean, &g_img[i])) {
+            !viewer_load_image_async(i, clean)) {
             fprintf(stderr, "Error: Failed to load image: %s\n", argv[i + 1]);
             app_cleanup();
             return 1;
         }
+        if (i == 0) {
+            snprintf(first_clean, sizeof(first_clean), "%s", clean);
+        }
     }
 
-    // Finalize window size (HiDPI may differ from requested) and fit view.
+    // Finalize window size (HiDPI may differ from requested) and directory navigation.
     SDL_GetWindowSize(g_win, &g_win_w, &g_win_h);
-    viewer_fit_view();
-    viewer_scan_current_dir(g_img[0].path);
+    viewer_scan_current_dir(first_clean);
     browser_init();
     viewer_update_title();
 
+    // Render first frame immediately to display "Loading..." splash.
+    viewer_render(g_ren);
+    SDL_RenderPresent(g_ren);
+
     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+
+    bool in_startup = true;
+    bool startup_pending[2] = {false, false};
+    for (int i = 0; i < g_count; i++) {
+        startup_pending[i] = true;
+    }
 
     bool dragging = false, running = true;
     int last_x = 0, last_y = 0;
 
     while (running) {
+        viewer_pump_async_loads();
+
+        if (in_startup) {
+            bool any_pending = false;
+            for (int i = 0; i < g_count; i++) {
+                if (startup_pending[i]) {
+                    if (!viewer_is_loading(i)) {
+                        startup_pending[i] = false;
+                        if (!g_img[i].tex) {
+                            fprintf(stderr, "Error: Failed to load image: %s\n", argv[i + 1]);
+                            app_cleanup();
+                            return 1;
+                        }
+                    } else {
+                        any_pending = true;
+                    }
+                }
+            }
+            if (!any_pending) {
+                in_startup = false;
+            }
+        }
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             // Browser overlay intercepts keyboard and mouse events when active.

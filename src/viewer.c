@@ -319,6 +319,7 @@ void viewer_format_file_size(off_t size, char *out, size_t out_sz) {
  * @return true if extension is recognized as a supported image, false otherwise.
  */
 bool viewer_is_image_file(const char *name) {
+    if (!name) return false;
     const char *dot = strrchr(name, '.');
     if (!dot || dot[1] == '\0') return false;
     const char *ext = dot + 1;
@@ -516,24 +517,8 @@ bool viewer_get_cached_stat_info(char *size_out, size_t size_sz, char *mtime_out
 }
 
 // ---------------------------------------------------------------------------
-// Image lifecycle
+// Image lifecycle and decoding
 // ---------------------------------------------------------------------------
-
-/**
- * Release GPU texture and heap-allocated path owned by an Image struct.
- *
- * Destroys im->tex, frees im->path, and zeroes the struct. Safe to call on
- * NULL or already-zeroed structures.
- *
- * @param im Pointer to Image struct to unload.
- */
-void viewer_unload_image(Image *im) {
-    if (!im) return;
-    if (im->tex) SDL_DestroyTexture(im->tex);
-    if (im->path) free(im->path);
-    memset(im, 0, sizeof(*im));
-    viewer_reset_metadata_cache();
-}
 
 /**
  * Decode image file from disk into a 32-bit RGBA pixel buffer.
@@ -565,6 +550,117 @@ static unsigned char *decode_image_surface(const char *path, int *out_w, int *ou
     *out_h = h;
     *out_channels = comp;
     return data;
+}
+
+/**
+ * State machine for background image decoding tasks.
+ */
+typedef enum {
+    ASYNC_IDLE = 0,
+    ASYNC_RUNNING,
+    ASYNC_DONE
+} AsyncState;
+
+/**
+ * Per-pane background decode task state and synchronization handles.
+ */
+typedef struct {
+    SDL_Thread *thread;
+    SDL_mutex *mutex;
+    AsyncState state;
+    char *path;
+    unsigned char *data;
+    int w;
+    int h;
+    int channels;
+    bool success;
+} AsyncDecodeTask;
+
+static AsyncDecodeTask s_async_tasks[2];
+
+/**
+ * Worker thread entry point for off-thread image file decoding.
+ *
+ * Invokes decode_image_surface without holding the mutex during heavy I/O and decode.
+ * Locks mutex only to record results and transition task state to ASYNC_DONE.
+ *
+ * @param arg Pointer to AsyncDecodeTask for the target pane.
+ * @return Thread status (always 0).
+ */
+static int async_decode_worker(void *arg) {
+    AsyncDecodeTask *task = (AsyncDecodeTask *)arg;
+    if (!task) return 0;
+
+    int w = 0, h = 0, channels = 0;
+    unsigned char *pixels = decode_image_surface(task->path, &w, &h, &channels);
+
+    SDL_LockMutex(task->mutex);
+    task->data = pixels;
+    task->w = w;
+    task->h = h;
+    task->channels = channels;
+    task->success = (pixels != NULL);
+    task->state = ASYNC_DONE;
+    SDL_UnlockMutex(task->mutex);
+
+    return 0;
+}
+
+/**
+ * Safely wait for a pane's active worker thread and clean up allocated buffers.
+ *
+ * Preserves task mutex for subsequent task reuse without reallocation churn.
+ *
+ * @param pane Target pane index (0 or 1).
+ */
+static void cancel_async_task(int pane) {
+    if (pane < 0 || pane >= 2) return;
+    AsyncDecodeTask *task = &s_async_tasks[pane];
+
+    if (task->thread) {
+        SDL_WaitThread(task->thread, NULL);
+        task->thread = NULL;
+    }
+    if (task->mutex) {
+        SDL_LockMutex(task->mutex);
+    }
+    if (task->data) {
+        stbi_image_free(task->data);
+        task->data = NULL;
+    }
+    if (task->path) {
+        free(task->path);
+        task->path = NULL;
+    }
+    task->state = ASYNC_IDLE;
+    task->w = 0;
+    task->h = 0;
+    task->channels = 0;
+    task->success = false;
+    if (task->mutex) {
+        SDL_UnlockMutex(task->mutex);
+    }
+}
+
+/**
+ * Release GPU texture and heap-allocated path owned by an Image struct.
+ *
+ * Destroys im->tex, frees im->path, and zeroes the struct. Safe to call on
+ * NULL or already-zeroed structures.
+ *
+ * @param im Pointer to Image struct to unload.
+ */
+void viewer_unload_image(Image *im) {
+    if (!im) return;
+    if (im == &g_img[0]) {
+        cancel_async_task(0);
+    } else if (im == &g_img[1]) {
+        cancel_async_task(1);
+    }
+    if (im->tex) SDL_DestroyTexture(im->tex);
+    if (im->path) free(im->path);
+    memset(im, 0, sizeof(*im));
+    viewer_reset_metadata_cache();
 }
 
 /**
@@ -633,6 +729,7 @@ bool viewer_load_image(const char *path, Image *out) {
  */
 bool viewer_replace_image(int pane, const char *path) {
     if (pane < 0 || pane > 1 || !path) return false;
+    cancel_async_task(pane);
     Image tmp = {0};
     if (!viewer_load_image(path, &tmp)) return false;
     viewer_unload_image(&g_img[pane]);
@@ -642,6 +739,163 @@ bool viewer_replace_image(int pane, const char *path) {
         viewer_scan_current_dir(path);
     }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Asynchronous image decoding
+// ---------------------------------------------------------------------------
+
+/**
+ * Start asynchronous decoding of an image file for the specified pane.
+ *
+ * Cancels any active task on the pane, unloads existing image, and spawns
+ * a background worker thread via SDL_CreateThread to decode RGBA pixels.
+ * Texture creation is deferred to viewer_pump_async_loads on the main thread.
+ *
+ * @param pane Target pane index (0 or 1).
+ * @param path Filesystem path to image file.
+ * @return true if worker thread was dispatched successfully, false on invalid args or thread failure.
+ */
+bool viewer_load_image_async(int pane, const char *path) {
+    if (pane < 0 || pane >= 2 || !path) return false;
+
+    viewer_unload_image(&g_img[pane]);
+
+    if (pane >= g_count) {
+        g_count = pane + 1;
+    }
+
+    AsyncDecodeTask *task = &s_async_tasks[pane];
+    if (!task->mutex) {
+        task->mutex = SDL_CreateMutex();
+        if (!task->mutex) return false;
+    }
+
+    char *path_copy = strdup(path);
+    if (!path_copy) return false;
+
+    task->path = path_copy;
+    task->data = NULL;
+    task->w = 0;
+    task->h = 0;
+    task->channels = 0;
+    task->success = false;
+    task->state = ASYNC_RUNNING;
+
+    char thread_name[32];
+    snprintf(thread_name, sizeof(thread_name), "img_decode_%d", pane);
+    task->thread = SDL_CreateThread(async_decode_worker, thread_name, task);
+    if (!task->thread) {
+        task->state = ASYNC_IDLE;
+        free(task->path);
+        task->path = NULL;
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * Query whether an asynchronous decoding task is currently active for a pane.
+ *
+ * Thread-safe inspection checking if worker thread is running or awaiting pump.
+ *
+ * @param pane Target pane index (0 or 1).
+ * @return true if pane is actively loading or awaiting texture creation, false otherwise.
+ */
+bool viewer_is_loading(int pane) {
+    if (pane < 0 || pane >= 2) return false;
+    AsyncDecodeTask *task = &s_async_tasks[pane];
+    if (!task->mutex) return false;
+
+    SDL_LockMutex(task->mutex);
+    bool loading = (task->state == ASYNC_RUNNING || task->state == ASYNC_DONE);
+    SDL_UnlockMutex(task->mutex);
+    return loading;
+}
+
+/**
+ * Process completed asynchronous image decode tasks on the main thread.
+ *
+ * Inspects both panes for finished worker threads. When a worker completes decoding,
+ * joins the thread, uploads decoded RGBA pixels into an SDL GPU texture on the
+ * main rendering context, frees intermediate pixel memory, updates g_img[pane],
+ * and recalculates view fitting and window title.
+ *
+ * @return true if at least one async task completed and was processed, false otherwise.
+ */
+bool viewer_pump_async_loads(void) {
+    bool processed_any = false;
+    for (int pane = 0; pane < 2; pane++) {
+        AsyncDecodeTask *task = &s_async_tasks[pane];
+        if (!task->mutex) continue;
+
+        SDL_LockMutex(task->mutex);
+        if (task->state != ASYNC_DONE) {
+            SDL_UnlockMutex(task->mutex);
+            continue;
+        }
+
+        SDL_Thread *th = task->thread;
+        task->thread = NULL;
+        unsigned char *data = task->data;
+        task->data = NULL;
+        int w = task->w;
+        int h = task->h;
+        int channels = task->channels;
+        bool success = task->success && (data != NULL);
+        char *path = task->path;
+        task->path = NULL;
+        task->state = ASYNC_IDLE;
+        SDL_UnlockMutex(task->mutex);
+
+        if (th) {
+            SDL_WaitThread(th, NULL);
+        }
+
+        if (success) {
+            SDL_Surface *surf = SDL_CreateRGBSurfaceWithFormatFrom(
+                data, w, h, 32, w * 4, SDL_PIXELFORMAT_RGBA32);
+            SDL_Texture *tex = (surf && g_ren) ? SDL_CreateTextureFromSurface(g_ren, surf) : NULL;
+            if (surf) SDL_FreeSurface(surf);
+            stbi_image_free(data);
+
+            if (tex) {
+                SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
+                g_img[pane].tex = tex;
+                g_img[pane].w = w;
+                g_img[pane].h = h;
+                g_img[pane].channels = channels;
+                g_img[pane].path = path;
+                viewer_fit_view();
+                viewer_update_title();
+            } else {
+                free(path);
+            }
+        } else {
+            if (data) stbi_image_free(data);
+            free(path);
+        }
+        processed_any = true;
+    }
+    return processed_any;
+}
+
+/**
+ * Wait for all running async decoding threads and release thread/task resources.
+ *
+ * Blocks until active worker threads finish, frees pending pixel buffers and paths,
+ * and destroys synchronization primitives. Safe to call multiple times.
+ */
+void viewer_cleanup_async(void) {
+    for (int i = 0; i < 2; i++) {
+        cancel_async_task(i);
+        AsyncDecodeTask *task = &s_async_tasks[i];
+        if (task->mutex) {
+            SDL_DestroyMutex(task->mutex);
+            task->mutex = NULL;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1865,6 +2119,18 @@ static void viewer_render_pane(SDL_Renderer *ren, int pane_idx, SDL_Rect clip) {
             SDL_FRect dst = {dx, dy, dw, dh};
             SDL_RenderCopyF(ren, im->tex, NULL, &dst);
         }
+    } else if (!im->tex && viewer_is_loading(pane_idx)) {
+        SDL_SetRenderDrawColor(ren, 25, 25, 25, 255);
+        SDL_RenderFillRect(ren, &clip);
+
+        const char *loading_text = "Loading...";
+        int scale = 2;
+        int text_w = (int)strlen(loading_text) * 8 * scale;
+        int text_h = 8 * scale;
+        int tx = clip.x + (clip.w - text_w) / 2;
+        int ty = clip.y + (clip.h - text_h) / 2;
+        SDL_Color splash_col = {180, 180, 180, 255};
+        text_draw(ren, tx, ty, loading_text, splash_col, scale);
     } else {
         SDL_SetRenderDrawColor(ren, 25, 25, 25, 255);
         SDL_RenderFillRect(ren, &clip);

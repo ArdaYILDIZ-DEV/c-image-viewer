@@ -271,6 +271,54 @@ void viewer_unload_image(Image *im);
 bool viewer_replace_image(int pane, const char *path);
 
 // ---------------------------------------------------------------------------
+// Asynchronous image decoding
+// ---------------------------------------------------------------------------
+
+/**
+ * Start asynchronous decoding of an image file for the specified pane.
+ *
+ * Cancels any active decoding task on the target pane, unloads any existing
+ * image, and spawns a background worker thread to load and decode the image
+ * into RGBA pixel memory. Texture creation is deferred to viewer_pump_async_loads.
+ *
+ * @param pane Target pane index (0 or 1).
+ * @param path Filesystem path to image file.
+ * @return true if worker thread was dispatched successfully, false on invalid args or thread failure.
+ */
+bool viewer_load_image_async(int pane, const char *path);
+
+/**
+ * Query whether an asynchronous decoding task is currently active for a pane.
+ *
+ * Thread-safe check indicating whether a worker thread is running or has completed
+ * decoding pending main-thread texture upload.
+ *
+ * @param pane Target pane index (0 or 1).
+ * @return true if pane is actively loading or awaiting texture creation, false otherwise.
+ */
+bool viewer_is_loading(int pane);
+
+/**
+ * Process completed asynchronous image decode tasks on the main thread.
+ *
+ * Inspects all panes for finished worker threads. When a worker completes decoding,
+ * joins the thread, uploads decoded RGBA pixels into an SDL GPU texture on the
+ * main rendering context, frees intermediate pixel memory, updates g_img[pane],
+ * and recalculates view fitting and window title.
+ *
+ * @return true if at least one async task completed and was processed, false otherwise.
+ */
+bool viewer_pump_async_loads(void);
+
+/**
+ * Wait for all running async decoding threads and release thread/task resources.
+ *
+ * Blocks until active worker threads finish, frees pending pixel buffers and paths,
+ * and destroys synchronization primitives. Safe to call multiple times or during shutdown.
+ */
+void viewer_cleanup_async(void);
+
+// ---------------------------------------------------------------------------
 // View control
 // ---------------------------------------------------------------------------
 
