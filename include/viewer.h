@@ -147,9 +147,15 @@ bool viewer_is_image_file(const char *name);
 
 /**
  * Truncate a filename to fit within max_len characters, preserving the file extension.
+ *
  * If name is longer than max_len, stems are truncated with "..." before the extension.
  * If there is no extension or it is too long, suffix truncation is applied.
  * Guarantees safe NUL termination for all max_len and out_sz values (including <= 0).
+ *
+ * @param name Source filename or path string to truncate.
+ * @param out Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ * @param max_len Maximum allowable output character count (excluding NUL).
  */
 void viewer_truncate_filename(const char *name, char *out, size_t out_sz, int max_len);
 
@@ -277,9 +283,12 @@ bool viewer_replace_image(int pane, const char *path);
 /**
  * Start asynchronous decoding of an image file for the specified pane.
  *
- * Cancels any active decoding task on the target pane, unloads any existing
- * image, and spawns a background worker thread to load and decode the image
- * into RGBA pixel memory. Texture creation is deferred to viewer_pump_async_loads.
+ * Cancels any active decoding task on the target pane, and spawns a background
+ * worker thread to load and decode the image into RGBA pixel memory. The existing
+ * image is preserved until viewer_pump_async_loads uploads the new texture.
+ *
+ * Concurrency note: Dispatches an SDL_Thread that decodes pixels off-thread
+ * without holding locks or stalling the main rendering loop.
  *
  * @param pane Target pane index (0 or 1).
  * @param path Filesystem path to image file.
@@ -290,8 +299,8 @@ bool viewer_load_image_async(int pane, const char *path);
 /**
  * Query whether an asynchronous decoding task is currently active for a pane.
  *
- * Thread-safe check indicating whether a worker thread is running or has completed
- * decoding pending main-thread texture upload.
+ * Concurrency note: Thread-safe; acquires the pane task mutex to safely inspect
+ * running or pending decode state.
  *
  * @param pane Target pane index (0 or 1).
  * @return true if pane is actively loading or awaiting texture creation, false otherwise.
@@ -306,6 +315,9 @@ bool viewer_is_loading(int pane);
  * main rendering context, frees intermediate pixel memory, updates g_img[pane],
  * and recalculates view fitting and window title.
  *
+ * Concurrency note: Must be called strictly from the main thread owning the
+ * SDL_Renderer context to safely upload GPU textures.
+ *
  * @return true if at least one async task completed and was processed, false otherwise.
  */
 bool viewer_pump_async_loads(void);
@@ -313,8 +325,9 @@ bool viewer_pump_async_loads(void);
 /**
  * Wait for all running async decoding threads and release thread/task resources.
  *
- * Blocks until active worker threads finish, frees pending pixel buffers and paths,
- * and destroys synchronization primitives. Safe to call multiple times or during shutdown.
+ * Concurrency note: Blocks until active worker threads finish via SDL_WaitThread,
+ * frees pending pixel buffers and paths, and destroys synchronization primitives.
+ * Safe to call multiple times or during shutdown.
  */
 void viewer_cleanup_async(void);
 
@@ -584,6 +597,9 @@ void viewer_render_metadata(SDL_Renderer *ren);
 
 /**
  * Toggle visibility of the right-hand EXIF and file metadata overlay panel.
+ *
+ * Flips g_show_metadata between true and false. When enabled, metadata is rendered
+ * over the right side of the active image viewport.
  */
 void viewer_toggle_metadata(void);
 

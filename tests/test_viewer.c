@@ -13,6 +13,7 @@
 #include <SDL2/SDL.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <math.h>
 
 static void test_viewer_truncate_filename(void) {
     char out[64];
@@ -2779,6 +2780,335 @@ static void test_viewer_async_decoding(void) {
     // Multiple cleanup calls must be safe and idempotent
     viewer_cleanup_async();
     viewer_cleanup_async();
+
+    // 8. Rapid cancellation stress test: 50 rapid alternating calls without intermediate pumping
+    for (int i = 0; i < 50; i++) {
+        const char *target = (i % 2 == 0) ? corrupt_png : valid_png;
+        TEST_ASSERT(viewer_load_image_async(0, target));
+    }
+    safety_spins = 1000;
+    while (viewer_is_loading(0) && --safety_spins > 0) {
+        viewer_pump_async_loads();
+        SDL_Delay(1);
+    }
+    viewer_pump_async_loads();
+    TEST_ASSERT(safety_spins > 0);
+    TEST_ASSERT(!viewer_is_loading(0));
+    TEST_ASSERT(g_img[0].tex != NULL);
+    TEST_ASSERT_INT_EQ(g_img[0].w, 16);
+    TEST_ASSERT_INT_EQ(g_img[0].h, 16);
+    TEST_ASSERT_INT_EQ(g_img[0].channels, 4);
+    TEST_ASSERT(g_img[0].path != NULL);
+    TEST_ASSERT_STR_EQ(g_img[0].path, valid_png);
+
+    // 9. Asymmetric dual-pane concurrency test: corrupt on pane 0, valid on pane 1
+    viewer_unload_image(&g_img[0]);
+    viewer_unload_image(&g_img[1]);
+    g_count = 2;
+    TEST_ASSERT(viewer_load_image_async(0, corrupt_png));
+    TEST_ASSERT(viewer_load_image_async(1, valid_png));
+    TEST_ASSERT(viewer_is_loading(0));
+    TEST_ASSERT(viewer_is_loading(1));
+
+    safety_spins = 1000;
+    while ((viewer_is_loading(0) || viewer_is_loading(1)) && --safety_spins > 0) {
+        viewer_pump_async_loads();
+        SDL_Delay(1);
+    }
+    viewer_pump_async_loads();
+    TEST_ASSERT(safety_spins > 0);
+    TEST_ASSERT(!viewer_is_loading(0));
+    TEST_ASSERT(!viewer_is_loading(1));
+    TEST_ASSERT(g_img[0].tex == NULL);
+    TEST_ASSERT(g_img[0].path == NULL);
+    TEST_ASSERT(g_img[1].tex != NULL);
+    TEST_ASSERT_INT_EQ(g_img[1].w, 16);
+    TEST_ASSERT_INT_EQ(g_img[1].h, 16);
+    TEST_ASSERT_INT_EQ(g_img[1].channels, 4);
+    TEST_ASSERT(g_img[1].path != NULL);
+    TEST_ASSERT_STR_EQ(g_img[1].path, valid_png);
+
+    // 10. Intensive memory & lifecycle stress test:
+    // 100 rapid cycles of: dispatch async load with valid PNG, immediately unload or cancel, and assert !viewer_is_loading
+    for (int i = 0; i < 100; i++) {
+        TEST_ASSERT(viewer_load_image_async(0, valid_png));
+        if (i % 2 == 0) {
+            viewer_unload_image(&g_img[0]);
+        } else {
+            viewer_cleanup_async();
+        }
+        TEST_ASSERT(!viewer_is_loading(0));
+    }
+
+    // 11. In-flight async load followed by viewer_replace_image with a corrupted image:
+    // verify replace returns false, in-flight task was canceled cleanly, previous image is preserved,
+    // and pumping afterwards is a clean no-op without leaks.
+    viewer_unload_image(&g_img[0]);
+    TEST_ASSERT(viewer_load_image(valid_png, &g_img[0]));
+    TEST_ASSERT(g_img[0].tex != NULL);
+    SDL_Texture *saved_tex0 = g_img[0].tex;
+    char saved_path0[PATH_MAX];
+    snprintf(saved_path0, sizeof(saved_path0), "%s", g_img[0].path);
+    int saved_w0 = g_img[0].w;
+    int saved_h0 = g_img[0].h;
+    int saved_channels0 = g_img[0].channels;
+
+    // Dispatch in-flight async load
+    TEST_ASSERT(viewer_load_image_async(0, valid_png));
+    TEST_ASSERT(viewer_is_loading(0));
+
+    // Followed immediately by viewer_replace_image with corrupted image
+    TEST_ASSERT(!viewer_replace_image(0, corrupt_png));
+
+    // Verify in-flight task was canceled cleanly
+    TEST_ASSERT(!viewer_is_loading(0));
+
+    // Verify previous image is preserved
+    TEST_ASSERT(g_img[0].tex == saved_tex0);
+    TEST_ASSERT(g_img[0].path != NULL);
+    TEST_ASSERT_STR_EQ(g_img[0].path, saved_path0);
+    TEST_ASSERT_INT_EQ(g_img[0].w, saved_w0);
+    TEST_ASSERT_INT_EQ(g_img[0].h, saved_h0);
+    TEST_ASSERT_INT_EQ(g_img[0].channels, saved_channels0);
+
+    // Verify pumping afterwards is a clean no-op without leaks
+    TEST_ASSERT(!viewer_pump_async_loads());
+    TEST_ASSERT(g_img[0].tex == saved_tex0);
+    TEST_ASSERT_STR_EQ(g_img[0].path, saved_path0);
+    TEST_ASSERT(!viewer_is_loading(0));
+
+    // Dual-pane verification: in-flight async load on pane 1 followed by viewer_replace_image with corrupt image
+    g_count = 2;
+    viewer_unload_image(&g_img[1]);
+    TEST_ASSERT(viewer_load_image(valid_png, &g_img[1]));
+    TEST_ASSERT(g_img[1].tex != NULL);
+    SDL_Texture *saved_tex1 = g_img[1].tex;
+    char saved_path1[PATH_MAX];
+    snprintf(saved_path1, sizeof(saved_path1), "%s", g_img[1].path);
+    int saved_w1 = g_img[1].w;
+    int saved_h1 = g_img[1].h;
+    int saved_channels1 = g_img[1].channels;
+
+    TEST_ASSERT(viewer_load_image_async(1, valid_png));
+    TEST_ASSERT(viewer_is_loading(1));
+
+    TEST_ASSERT(!viewer_replace_image(1, corrupt_png));
+    TEST_ASSERT(!viewer_is_loading(1));
+    TEST_ASSERT(g_img[1].tex == saved_tex1);
+    TEST_ASSERT(g_img[1].path != NULL);
+    TEST_ASSERT_STR_EQ(g_img[1].path, saved_path1);
+    TEST_ASSERT_INT_EQ(g_img[1].w, saved_w1);
+    TEST_ASSERT_INT_EQ(g_img[1].h, saved_h1);
+    TEST_ASSERT_INT_EQ(g_img[1].channels, saved_channels1);
+
+    TEST_ASSERT(!viewer_pump_async_loads());
+    TEST_ASSERT(g_img[1].tex == saved_tex1);
+    TEST_ASSERT_STR_EQ(g_img[1].path, saved_path1);
+    TEST_ASSERT(!viewer_is_loading(1));
+
+    // 12. Error and boundary conditions: 0-byte empty file, truncated PNG header, non-existent path
+    const char *empty_file = "/tmp/civ_test_async_empty.png";
+    write_raw_file(empty_file, "", 0);
+
+    viewer_unload_image(&g_img[0]);
+    TEST_ASSERT(viewer_load_image_async(0, empty_file));
+    TEST_ASSERT(viewer_is_loading(0));
+    safety_spins = 1000;
+    while (viewer_is_loading(0) && --safety_spins > 0) {
+        viewer_pump_async_loads();
+        SDL_Delay(1);
+    }
+    viewer_pump_async_loads();
+    TEST_ASSERT(safety_spins > 0);
+    TEST_ASSERT(!viewer_is_loading(0));
+    TEST_ASSERT(g_img[0].tex == NULL);
+    TEST_ASSERT(g_img[0].path == NULL);
+    unlink(empty_file);
+
+    const char *trunc_file = "/tmp/civ_test_async_trunc.png";
+    uint8_t png_magic[] = { 0x89, 'P', 'N', 'G', '\r', '\n', 0x1A, '\n' };
+    write_raw_file(trunc_file, png_magic, sizeof(png_magic));
+
+    viewer_unload_image(&g_img[0]);
+    TEST_ASSERT(viewer_load_image_async(0, trunc_file));
+    TEST_ASSERT(viewer_is_loading(0));
+    safety_spins = 1000;
+    while (viewer_is_loading(0) && --safety_spins > 0) {
+        viewer_pump_async_loads();
+        SDL_Delay(1);
+    }
+    viewer_pump_async_loads();
+    TEST_ASSERT(safety_spins > 0);
+    TEST_ASSERT(!viewer_is_loading(0));
+    TEST_ASSERT(g_img[0].tex == NULL);
+    TEST_ASSERT(g_img[0].path == NULL);
+    unlink(trunc_file);
+
+    const char *nonexistent_file = "/tmp/civ_test_async_nonexistent_9999.png";
+    unlink(nonexistent_file);
+
+    viewer_unload_image(&g_img[0]);
+    TEST_ASSERT(viewer_load_image_async(0, nonexistent_file));
+    TEST_ASSERT(viewer_is_loading(0));
+    safety_spins = 1000;
+    while (viewer_is_loading(0) && --safety_spins > 0) {
+        viewer_pump_async_loads();
+        SDL_Delay(1);
+    }
+    viewer_pump_async_loads();
+    TEST_ASSERT(safety_spins > 0);
+    TEST_ASSERT(!viewer_is_loading(0));
+    TEST_ASSERT(g_img[0].tex == NULL);
+    TEST_ASSERT(g_img[0].path == NULL);
+
+    // 13. Status bar and metadata rendering while image is actively loading
+    int orig_win_w = g_win_w;
+    int orig_win_h = g_win_h;
+    bool orig_show_info = g_show_info;
+    bool orig_show_meta = g_show_metadata;
+
+    g_win_w = 800;
+    g_win_h = 600;
+    g_show_info = true;
+    g_show_metadata = true;
+
+    // Single-pane loading status bar and metadata verification
+    g_count = 1;
+    viewer_unload_image(&g_img[0]);
+    TEST_ASSERT(viewer_load_image(valid_png, &g_img[0]));
+    TEST_ASSERT(viewer_load_image_async(0, valid_png));
+    TEST_ASSERT(viewer_is_loading(0));
+
+    // Invoke renderer while actively loading
+    viewer_render_info_bar(g_ren);
+    viewer_render_metadata(g_ren);
+
+    char status_single[512];
+    ViewerStatusBarLayout layout_s = viewer_calc_status_layout_single(
+        g_win_w, valid_png, 0, 0, 100, true, 1, 1);
+    int len_s = viewer_format_status_single(
+        &layout_s, valid_png, 0, 0, 100, true, 1, 1, status_single, sizeof(status_single));
+    TEST_ASSERT(len_s > 0);
+    TEST_ASSERT(strstr(status_single, "Loading...") != NULL);
+    TEST_ASSERT(strstr(status_single, "0x0") == NULL);
+
+    // Verify small buffer bounds safety (no buffer overruns)
+    char small_s[12];
+    int small_len_s = viewer_format_status_single(
+        &layout_s, valid_png, 0, 0, 100, true, 1, 1, small_s, sizeof(small_s));
+    TEST_ASSERT(small_len_s < (int)sizeof(small_s));
+    TEST_ASSERT_INT_EQ((int)strlen(small_s), small_len_s);
+    TEST_ASSERT(small_s[sizeof(small_s) - 1] == '\0');
+
+    // Dual-pane loading status bar verification (both panes loading)
+    g_count = 2;
+    TEST_ASSERT(viewer_load_image(valid_png, &g_img[1]));
+    TEST_ASSERT(viewer_load_image_async(1, valid_png));
+    TEST_ASSERT(viewer_is_loading(0));
+    TEST_ASSERT(viewer_is_loading(1));
+
+    viewer_render_info_bar(g_ren);
+    g_active = 0;
+    viewer_render_metadata(g_ren);
+    g_active = 1;
+    viewer_render_metadata(g_ren);
+
+    char status_dual[512];
+    ViewerStatusBarLayout layout_d = viewer_calc_status_layout_dual(
+        g_win_w, valid_png, 0, 0, valid_png, 0, 0, 100, true, 0);
+    int len_d = viewer_format_status_dual(
+        &layout_d, valid_png, 0, 0, valid_png, 0, 0, 100, true, 0, status_dual, sizeof(status_dual));
+    TEST_ASSERT(len_d > 0);
+    TEST_ASSERT(strstr(status_dual, "Loading...") != NULL);
+    TEST_ASSERT(strstr(status_dual, "(Loading...)") != NULL);
+    TEST_ASSERT(strstr(status_dual, "0x0") == NULL);
+
+    // Verify small buffer bounds safety in dual pane
+    char small_d[12];
+    int small_len_d = viewer_format_status_dual(
+        &layout_d, valid_png, 0, 0, valid_png, 0, 0, 100, true, 0, small_d, sizeof(small_d));
+    TEST_ASSERT(small_len_d < (int)sizeof(small_d));
+    TEST_ASSERT_INT_EQ((int)strlen(small_d), small_len_d);
+    TEST_ASSERT(small_d[sizeof(small_d) - 1] == '\0');
+
+    // Dual-pane asymmetric loading: cancel pane 1 and load synchronously, pane 0 still loading
+    viewer_unload_image(&g_img[1]);
+    TEST_ASSERT(!viewer_is_loading(1));
+    TEST_ASSERT(viewer_load_image(valid_png, &g_img[1]));
+    TEST_ASSERT(viewer_is_loading(0));
+    TEST_ASSERT(!viewer_is_loading(1));
+
+    viewer_render_info_bar(g_ren);
+    g_active = 0;
+    viewer_render_metadata(g_ren);
+    g_active = 1;
+    viewer_render_metadata(g_ren);
+
+    char status_asym[512];
+    ViewerStatusBarLayout layout_asym = viewer_calc_status_layout_dual(
+        g_win_w, valid_png, 0, 0, valid_png, g_img[1].w, g_img[1].h, 100, true, 0);
+    int len_asym = viewer_format_status_dual(
+        &layout_asym, valid_png, 0, 0, valid_png, g_img[1].w, g_img[1].h, 100, true, 0, status_asym, sizeof(status_asym));
+    TEST_ASSERT(len_asym > 0);
+    TEST_ASSERT(strstr(status_asym, "(Loading...)") != NULL);
+    TEST_ASSERT(strstr(status_asym, "(16x16)") != NULL);
+
+    // Clean up async tasks
+    viewer_cleanup_async();
+    TEST_ASSERT(!viewer_is_loading(0));
+    TEST_ASSERT(!viewer_is_loading(1));
+
+    // 14. UI/UX edge cases during active loading: degenerate window sizes and view fitting
+    g_count = 1;
+    viewer_unload_image(&g_img[0]);
+    viewer_unload_image(&g_img[1]);
+    TEST_ASSERT(viewer_load_image_async(0, valid_png));
+    TEST_ASSERT(viewer_is_loading(0));
+
+    // Degenerate window sizes (0x0) while actively loading
+    g_win_w = 0;
+    g_win_h = 0;
+    viewer_render(g_ren);
+    viewer_fit_view();
+    TEST_ASSERT(g_zoom >= 0.05f && g_zoom <= 1.0f);
+    TEST_ASSERT(!isnan(g_zoom) && !isinf(g_zoom));
+
+    // Narrow window size (20x15, narrower than splash text) in single pane
+    g_win_w = 20;
+    g_win_h = 15;
+    viewer_render(g_ren);
+    viewer_fit_view();
+    TEST_ASSERT(g_zoom >= 0.05f && g_zoom <= 1.0f);
+    TEST_ASSERT(!isnan(g_zoom) && !isinf(g_zoom));
+
+    // Narrow window size in dual pane (both panes actively loading)
+    g_count = 2;
+    TEST_ASSERT(viewer_load_image_async(1, valid_png));
+    TEST_ASSERT(viewer_is_loading(0));
+    TEST_ASSERT(viewer_is_loading(1));
+    viewer_render(g_ren);
+    viewer_fit_view();
+    TEST_ASSERT(g_zoom >= 0.05f && g_zoom <= 1.0f);
+    TEST_ASSERT(!isnan(g_zoom) && !isinf(g_zoom));
+
+    // View fitting in free mode while actively loading
+    g_sync = false;
+    viewer_fit_view();
+    TEST_ASSERT(g_free_zoom[0] >= 0.05f && g_free_zoom[0] <= 1.0f);
+    TEST_ASSERT(g_free_zoom[1] >= 0.05f && g_free_zoom[1] <= 1.0f);
+    TEST_ASSERT(!isnan(g_free_zoom[0]) && !isnan(g_free_zoom[1]));
+    viewer_render(g_ren);
+    g_sync = orig_sync;
+
+    // Clean up async tasks
+    viewer_cleanup_async();
+    TEST_ASSERT(!viewer_is_loading(0));
+    TEST_ASSERT(!viewer_is_loading(1));
+
+    g_win_w = orig_win_w;
+    g_win_h = orig_win_h;
+    g_show_info = orig_show_info;
+    g_show_metadata = orig_show_meta;
 
     // Cleanup files and state
     unlink(valid_png);

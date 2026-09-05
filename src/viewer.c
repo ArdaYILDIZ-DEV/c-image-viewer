@@ -20,6 +20,7 @@
 #define _DEFAULT_SOURCE
 #endif
 
+#define STBI_THREAD_LOCAL _Thread_local
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
@@ -128,8 +129,15 @@ bool viewer_path_join(char *dst, size_t dst_size, const char *dir, const char *f
 
 /**
  * Truncate a filename to fit within max_len characters, preserving the file extension.
+ *
  * If name is longer than max_len, stems are truncated with "..." before the extension.
  * If there is no extension or it is too long, suffix truncation is applied.
+ * Guarantees safe NUL termination for all max_len and out_sz values (including <= 0).
+ *
+ * @param name Source filename or path string to truncate.
+ * @param out Destination character buffer.
+ * @param out_sz Size of destination buffer in bytes.
+ * @param max_len Maximum allowable output character count (excluding NUL).
  */
 void viewer_truncate_filename(const char *name, char *out, size_t out_sz, int max_len) {
     if (!out || out_sz == 0) return;
@@ -584,6 +592,8 @@ static AsyncDecodeTask s_async_tasks[2];
  * Invokes decode_image_surface without holding the mutex during heavy I/O and decode.
  * Locks mutex only to record results and transition task state to ASYNC_DONE.
  *
+ * Concurrency note: Runs in a dedicated background worker thread per pane.
+ *
  * @param arg Pointer to AsyncDecodeTask for the target pane.
  * @return Thread status (always 0).
  */
@@ -594,14 +604,14 @@ static int async_decode_worker(void *arg) {
     int w = 0, h = 0, channels = 0;
     unsigned char *pixels = decode_image_surface(task->path, &w, &h, &channels);
 
-    SDL_LockMutex(task->mutex);
+    if (task->mutex) SDL_LockMutex(task->mutex);
     task->data = pixels;
     task->w = w;
     task->h = h;
     task->channels = channels;
     task->success = (pixels != NULL);
     task->state = ASYNC_DONE;
-    SDL_UnlockMutex(task->mutex);
+    if (task->mutex) SDL_UnlockMutex(task->mutex);
 
     return 0;
 }
@@ -609,6 +619,8 @@ static int async_decode_worker(void *arg) {
 /**
  * Safely wait for a pane's active worker thread and clean up allocated buffers.
  *
+ * Concurrency note: Blocks caller until the target pane thread finishes via
+ * SDL_WaitThread, then locks mutex to safely free decoded pixels and path.
  * Preserves task mutex for subsequent task reuse without reallocation churn.
  *
  * @param pane Target pane index (0 or 1).
@@ -748,9 +760,13 @@ bool viewer_replace_image(int pane, const char *path) {
 /**
  * Start asynchronous decoding of an image file for the specified pane.
  *
- * Cancels any active task on the pane, unloads existing image, and spawns
- * a background worker thread via SDL_CreateThread to decode RGBA pixels.
+ * Cancels any active task on the pane, and spawns a background worker thread
+ * via SDL_CreateThread to decode RGBA pixels. The current image in the pane
+ * is preserved until viewer_pump_async_loads uploads the newly decoded texture.
  * Texture creation is deferred to viewer_pump_async_loads on the main thread.
+ *
+ * Concurrency note: Dispatches an SDL_Thread that decodes pixels off-thread
+ * without holding locks or stalling the main rendering loop.
  *
  * @param pane Target pane index (0 or 1).
  * @param path Filesystem path to image file.
@@ -759,7 +775,7 @@ bool viewer_replace_image(int pane, const char *path) {
 bool viewer_load_image_async(int pane, const char *path) {
     if (pane < 0 || pane >= 2 || !path) return false;
 
-    viewer_unload_image(&g_img[pane]);
+    cancel_async_task(pane);
 
     if (pane >= g_count) {
         g_count = pane + 1;
@@ -774,6 +790,7 @@ bool viewer_load_image_async(int pane, const char *path) {
     char *path_copy = strdup(path);
     if (!path_copy) return false;
 
+    SDL_LockMutex(task->mutex);
     task->path = path_copy;
     task->data = NULL;
     task->w = 0;
@@ -781,14 +798,17 @@ bool viewer_load_image_async(int pane, const char *path) {
     task->channels = 0;
     task->success = false;
     task->state = ASYNC_RUNNING;
+    SDL_UnlockMutex(task->mutex);
 
     char thread_name[32];
     snprintf(thread_name, sizeof(thread_name), "img_decode_%d", pane);
     task->thread = SDL_CreateThread(async_decode_worker, thread_name, task);
     if (!task->thread) {
+        SDL_LockMutex(task->mutex);
         task->state = ASYNC_IDLE;
         free(task->path);
         task->path = NULL;
+        SDL_UnlockMutex(task->mutex);
         return false;
     }
 
@@ -798,7 +818,8 @@ bool viewer_load_image_async(int pane, const char *path) {
 /**
  * Query whether an asynchronous decoding task is currently active for a pane.
  *
- * Thread-safe inspection checking if worker thread is running or awaiting pump.
+ * Concurrency note: Thread-safe; acquires the pane task mutex to safely inspect
+ * running or pending decode state.
  *
  * @param pane Target pane index (0 or 1).
  * @return true if pane is actively loading or awaiting texture creation, false otherwise.
@@ -819,8 +840,12 @@ bool viewer_is_loading(int pane) {
  *
  * Inspects both panes for finished worker threads. When a worker completes decoding,
  * joins the thread, uploads decoded RGBA pixels into an SDL GPU texture on the
- * main rendering context, frees intermediate pixel memory, updates g_img[pane],
- * and recalculates view fitting and window title.
+ * main rendering context, frees intermediate pixel memory, unloads any previous
+ * image, updates g_img[pane], and recalculates view fitting and window title.
+ * On failure, cleanly unloads any previous image and reclaims task resources.
+ *
+ * Concurrency note: Must be called strictly from the main thread owning the
+ * SDL_Renderer context to safely upload GPU textures.
  *
  * @return true if at least one async task completed and was processed, false otherwise.
  */
@@ -862,6 +887,7 @@ bool viewer_pump_async_loads(void) {
 
             if (tex) {
                 SDL_SetTextureScaleMode(tex, SDL_ScaleModeLinear);
+                viewer_unload_image(&g_img[pane]);
                 g_img[pane].tex = tex;
                 g_img[pane].w = w;
                 g_img[pane].h = h;
@@ -870,9 +896,11 @@ bool viewer_pump_async_loads(void) {
                 viewer_fit_view();
                 viewer_update_title();
             } else {
+                viewer_unload_image(&g_img[pane]);
                 free(path);
             }
         } else {
+            viewer_unload_image(&g_img[pane]);
             if (data) stbi_image_free(data);
             free(path);
         }
@@ -884,8 +912,9 @@ bool viewer_pump_async_loads(void) {
 /**
  * Wait for all running async decoding threads and release thread/task resources.
  *
- * Blocks until active worker threads finish, frees pending pixel buffers and paths,
- * and destroys synchronization primitives. Safe to call multiple times.
+ * Concurrency note: Blocks until active worker threads finish via SDL_WaitThread,
+ * frees pending pixel buffers and paths, and destroys synchronization primitives.
+ * Safe to call multiple times or during shutdown.
  */
 void viewer_cleanup_async(void) {
     for (int i = 0; i < 2; i++) {
@@ -1579,14 +1608,26 @@ int viewer_format_status_single(
     const char *hint = s_hint_single[tier];
 
     int written = 0;
-    if (hint && hint[0] != '\0') {
-        written = snprintf(out_buf, out_sz, "%s  %dx%d  %d%%  %s  %d/%d  %s",
-            trunc, img_w, img_h, zoom_pct, is_sync ? "SYNC" : "FREE",
-            file_idx, file_count, hint);
+    if (viewer_is_loading(0)) {
+        if (hint && hint[0] != '\0') {
+            written = snprintf(out_buf, out_sz, "%s  Loading...  %s  %d/%d  %s",
+                trunc, is_sync ? "SYNC" : "FREE",
+                file_idx, file_count, hint);
+        } else {
+            written = snprintf(out_buf, out_sz, "%s  Loading...  %s  %d/%d",
+                trunc, is_sync ? "SYNC" : "FREE",
+                file_idx, file_count);
+        }
     } else {
-        written = snprintf(out_buf, out_sz, "%s  %dx%d  %d%%  %s  %d/%d",
-            trunc, img_w, img_h, zoom_pct, is_sync ? "SYNC" : "FREE",
-            file_idx, file_count);
+        if (hint && hint[0] != '\0') {
+            written = snprintf(out_buf, out_sz, "%s  %dx%d  %d%%  %s  %d/%d  %s",
+                trunc, img_w, img_h, zoom_pct, is_sync ? "SYNC" : "FREE",
+                file_idx, file_count, hint);
+        } else {
+            written = snprintf(out_buf, out_sz, "%s  %dx%d  %d%%  %s  %d/%d",
+                trunc, img_w, img_h, zoom_pct, is_sync ? "SYNC" : "FREE",
+                file_idx, file_count);
+        }
     }
     if (written < 0) {
         out_buf[0] = '\0';
@@ -1656,14 +1697,28 @@ int viewer_format_status_dual(
     }
     const char *hint = s_hint_dual[tier];
 
+    char dim0[64];
+    if (viewer_is_loading(0)) {
+        snprintf(dim0, sizeof(dim0), "Loading...");
+    } else {
+        snprintf(dim0, sizeof(dim0), "%dx%d", img0_w, img0_h);
+    }
+
+    char dim1[64];
+    if (viewer_is_loading(1)) {
+        snprintf(dim1, sizeof(dim1), "Loading...");
+    } else {
+        snprintf(dim1, sizeof(dim1), "%dx%d", img1_w, img1_h);
+    }
+
     int written = 0;
     if (hint && hint[0] != '\0') {
-        written = snprintf(out_buf, out_sz, "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s  %s",
-            trunc0, img0_w, img0_h, trunc1, img1_w, img1_h, zoom_pct,
+        written = snprintf(out_buf, out_sz, "%s (%s) | %s (%s)  %d%%  %s%s  %s",
+            trunc0, dim0, trunc1, dim1, zoom_pct,
             is_sync ? "SYNC" : "FREE", pane_ind, hint);
     } else {
-        written = snprintf(out_buf, out_sz, "%s (%dx%d) | %s (%dx%d)  %d%%  %s%s",
-            trunc0, img0_w, img0_h, trunc1, img1_w, img1_h, zoom_pct,
+        written = snprintf(out_buf, out_sz, "%s (%s) | %s (%s)  %d%%  %s%s",
+            trunc0, dim0, trunc1, dim1, zoom_pct,
             is_sync ? "SYNC" : "FREE", pane_ind);
     }
     if (written < 0) {
@@ -2018,11 +2073,19 @@ void viewer_render_metadata(SDL_Renderer *ren) {
     } while(0)
 
     char dim[64];
-    snprintf(dim, sizeof(dim), "%d x %d", im->w > 0 ? im->w : 0, im->h > 0 ? im->h : 0);
+    if (viewer_is_loading(pane)) {
+        snprintf(dim, sizeof(dim), "Loading...");
+    } else {
+        snprintf(dim, sizeof(dim), "%d x %d", im->w > 0 ? im->w : 0, im->h > 0 ? im->h : 0);
+    }
     MD_ROW("Dimensions", dim);
 
     char color_str[32];
-    viewer_format_color_depth(im->channels, color_str, sizeof(color_str));
+    if (viewer_is_loading(pane)) {
+        snprintf(color_str, sizeof(color_str), "Loading...");
+    } else {
+        viewer_format_color_depth(im->channels, color_str, sizeof(color_str));
+    }
     MD_ROW("Format", color_str);
 
     MD_ROW("File size", s_cached_size_str);
@@ -2129,8 +2192,10 @@ static void viewer_render_pane(SDL_Renderer *ren, int pane_idx, SDL_Rect clip) {
         int text_h = 8 * scale;
         int tx = clip.x + (clip.w - text_w) / 2;
         int ty = clip.y + (clip.h - text_h) / 2;
+        if (tx < clip.x) tx = clip.x;
+        if (ty < clip.y) ty = clip.y;
         SDL_Color splash_col = {180, 180, 180, 255};
-        text_draw(ren, tx, ty, loading_text, splash_col, scale);
+        text_draw_clipped(ren, tx, ty, loading_text, splash_col, scale, clip.w);
     } else {
         SDL_SetRenderDrawColor(ren, 25, 25, 25, 255);
         SDL_RenderFillRect(ren, &clip);

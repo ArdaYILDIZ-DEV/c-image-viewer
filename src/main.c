@@ -128,8 +128,9 @@ static void handle_clipboard_paste(void) {
  * @param key Pressed SDL keycode.
  * @param mod Active SDL key modifiers.
  * @param running Pointer to application event loop running flag.
+ * @param in_startup True if initial startup images are still decoding.
  */
-static void handle_keydown(SDL_Keycode key, SDL_Keymod mod, bool *running) {
+static void handle_keydown(SDL_Keycode key, SDL_Keymod mod, bool *running, bool in_startup) {
     if (mod & KMOD_CTRL) {
         switch (key) {
         case SDLK_c: handle_clipboard_copy(); return;
@@ -183,6 +184,7 @@ static void handle_keydown(SDL_Keycode key, SDL_Keymod mod, bool *running) {
     case SDLK_p:
     case SDLK_LEFT:
     case SDLK_PAGEUP: {
+        if (in_startup) break;
         int dir = (key == SDLK_p || key == SDLK_LEFT || key == SDLK_PAGEUP) ? -1 : +1;
         if (!browser_is_open() && viewer_navigate(dir)) {
             viewer_fit_view();
@@ -417,7 +419,7 @@ int main(int argc, char *argv[]) {
                 break;
             }
             case SDL_KEYDOWN:
-                handle_keydown(ev.key.keysym.sym, ev.key.keysym.mod, &running);
+                handle_keydown(ev.key.keysym.sym, ev.key.keysym.mod, &running, in_startup);
                 break;
             default: break;
             }
