@@ -707,7 +707,7 @@ bool browser_handle_key(SDL_Keycode key, SDL_Keymod mod) {
             else expand_entry(s_selected);
         } else {
             // Image file: load into active pane and close browser
-            int pane = (g_count == 1) ? 0 : g_active;
+            int pane = viewer_get_active_pane();
             if (viewer_replace_image(pane, e->path)) {
                 viewer_fit_view();
                 viewer_update_title();
@@ -780,7 +780,7 @@ bool browser_handle_event(const SDL_Event *ev) {
                         if (e->expanded) collapse_entry(idx);
                         else expand_entry(idx);
                     } else {
-                        int pane = (g_count == 1) ? 0 : g_active;
+                        int pane = viewer_get_active_pane();
                         if (viewer_replace_image(pane, e->path)) {
                             viewer_fit_view();
                             viewer_update_title();

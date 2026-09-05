@@ -3148,7 +3148,22 @@ static void test_viewer_dual_pane_sync_zoom_cursor_anchor(void) {
     float orig_fpx[2] = { g_free_pan_x[0], g_free_pan_x[1] };
     float orig_fpy[2] = { g_free_pan_y[0], g_free_pan_y[1] };
 
+    // Verify helper functions
     g_count = 2;
+    g_win_w = 800;
+    g_win_h = 600;
+    g_active = 1;
+    TEST_ASSERT(viewer_get_active_pane() == 1);
+    TEST_ASSERT(viewer_get_pane_at(399) == 0);
+    TEST_ASSERT(viewer_get_pane_at(400) == 1);
+    float h_cx0, h_cy0, h_cx1, h_cy1;
+    viewer_get_pane_center(0, &h_cx0, &h_cy0);
+    viewer_get_pane_center(1, &h_cx1, &h_cy1);
+    TEST_ASSERT(fabsf(h_cx0 - 200.0f) < 1e-5f);
+    TEST_ASSERT(fabsf(h_cx1 - 600.0f) < 1e-5f);
+    TEST_ASSERT(fabsf(h_cy0 - 300.0f) < 1e-5f);
+    TEST_ASSERT(fabsf(h_cy1 - 300.0f) < 1e-5f);
+
     g_sync = true;
 
     // --- Section 1: Even window width (800x600) ---

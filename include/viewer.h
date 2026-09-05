@@ -22,6 +22,9 @@
 #define PATH_MAX 4096
 #endif
 
+#define VIEWER_ZOOM_MIN 0.05f
+#define VIEWER_ZOOM_MAX 32.0f
+
 #define VIEWER_INFO_NAME_MAX 24
 #define VIEWER_INFO_DUAL_NAME_MAX 18
 
@@ -391,6 +394,33 @@ void viewer_toggle_sync(void);
  * In single-pane mode, ensures g_active is 0.
  */
 void viewer_toggle_active_pane(void);
+
+/**
+ * Get the layout center coordinates for a specific pane or screen coordinate.
+ *
+ * For dual-pane layout, respects the integer split midpoint (mid = win_w / 2)
+ * and subpixel floating point precision across even and odd window dimensions.
+ *
+ * @param pane Pane index (0 or 1).
+ * @param cx Output pointer to receive center X coordinate.
+ * @param cy Output pointer to receive center Y coordinate.
+ */
+void viewer_get_pane_center(int pane, float *cx, float *cy);
+
+/**
+ * Get the pane index corresponding to a window-space horizontal coordinate.
+ *
+ * @param mx Horizontal coordinate in window space.
+ * @return 0 for left pane (or single-image mode), 1 for right pane when g_count == 2.
+ */
+int viewer_get_pane_at(int mx);
+
+/**
+ * Get the currently active pane index, clamped to the valid range [0, g_count - 1].
+ *
+ * @return Active pane index (0 in single-image mode, 0 or 1 in dual-image mode).
+ */
+int viewer_get_active_pane(void);
 
 /**
  * Toggle between windowed and fullscreen desktop display modes.

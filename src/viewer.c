@@ -1013,11 +1013,61 @@ void viewer_fit_view(void) {
 }
 
 /**
+ * Get the layout center coordinates for a specific pane or screen coordinate.
+ *
+ * For dual-pane layout, respects the integer split midpoint (mid = win_w / 2)
+ * and subpixel floating point precision across even and odd window dimensions:
+ * - Pane 0: mid * 0.5f
+ * - Pane 1: mid + (win_w - mid) * 0.5f
+ * - Single-pane: win_w * 0.5f
+ *
+ * @param pane Pane index (0 or 1).
+ * @param cx Output pointer to receive center X coordinate.
+ * @param cy Output pointer to receive center Y coordinate.
+ */
+void viewer_get_pane_center(int pane, float *cx, float *cy) {
+    if (cx) {
+        if (g_count == 2) {
+            int mid = g_win_w / 2;
+            *cx = (pane == 0) ? ((float)mid * 0.5f) : ((float)mid + (float)(g_win_w - mid) * 0.5f);
+        } else {
+            *cx = (float)g_win_w * 0.5f;
+        }
+    }
+    if (cy) {
+        *cy = (float)g_win_h * 0.5f;
+    }
+}
+
+/**
+ * Get the pane index corresponding to a window-space horizontal coordinate.
+ *
+ * @param mx Horizontal coordinate in window space.
+ * @return 0 for left pane (or single-image mode), 1 for right pane when g_count == 2.
+ */
+int viewer_get_pane_at(int mx) {
+    if (g_count == 2 && mx >= g_win_w / 2) {
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * Get the currently active pane index, clamped to the valid range [0, g_count - 1].
+ *
+ * @return Active pane index (0 in single-image mode, 0 or 1 in dual-image mode).
+ */
+int viewer_get_active_pane(void) {
+    if (g_count <= 1 || g_active != 1) return 0;
+    return 1;
+}
+
+/**
  * Apply a zoom factor centered on a window coordinate.
  *
  * Keeps the world point under (mx, my) stationary across zoom changes by
  * adjusting pan in image-space: pan_new = pan_old + (cursor - center) * (1/next - 1/old).
- * Clamps zoom between 0.05x (5%) and 32.0x (3200%).
+ * Clamps zoom between VIEWER_ZOOM_MIN (0.05x) and VIEWER_ZOOM_MAX (32.0x).
  *
  * @param factor Multiplicative zoom step (> 0, e.g. 1.1 for in, 0.9 for out).
  * @param mx Cursor X coordinate in window space.
@@ -1029,19 +1079,15 @@ void viewer_do_zoom(float factor, int mx, int my) {
     if (g_win_w <= 0 || g_win_h <= 0) return;
 
     if (g_sync) {
-        float old = g_zoom < 0.05f ? 0.05f : g_zoom;
+        float old = g_zoom < VIEWER_ZOOM_MIN ? VIEWER_ZOOM_MIN : g_zoom;
         float next = old * factor;
-        if (next < 0.05f) next = 0.05f;
-        if (next > 32.0f) next = 32.0f;
+        if (next < VIEWER_ZOOM_MIN) next = VIEWER_ZOOM_MIN;
+        if (next > VIEWER_ZOOM_MAX) next = VIEWER_ZOOM_MAX;
         if (next == old) return;
-        float pane_cx;
-        if (g_count == 2) {
-            int mid = g_win_w / 2;
-            pane_cx = (mx < mid) ? ((float)mid * 0.5f) : ((float)mid + (float)(g_win_w - mid) * 0.5f);
-        } else {
-            pane_cx = (float)g_win_w * 0.5f;
-        }
-        float pane_cy = (float)g_win_h * 0.5f;
+
+        float pane_cx, pane_cy;
+        viewer_get_pane_center(viewer_get_pane_at(mx), &pane_cx, &pane_cy);
+
         g_pan_x += ((float)mx - pane_cx) * (1.0f / next - 1.0f / old);
         g_pan_y += ((float)my - pane_cy) * (1.0f / next - 1.0f / old);
         g_zoom = next;
@@ -1051,21 +1097,16 @@ void viewer_do_zoom(float factor, int mx, int my) {
             g_free_pan_y[i] = g_pan_y;
         }
     } else {
-        int p = g_active;
-        if (p < 0 || p >= g_count) p = 0;
-        float old = g_free_zoom[p] < 0.05f ? 0.05f : g_free_zoom[p];
+        int p = viewer_get_active_pane();
+        float old = g_free_zoom[p] < VIEWER_ZOOM_MIN ? VIEWER_ZOOM_MIN : g_free_zoom[p];
         float next = old * factor;
-        if (next < 0.05f) next = 0.05f;
-        if (next > 32.0f) next = 32.0f;
+        if (next < VIEWER_ZOOM_MIN) next = VIEWER_ZOOM_MIN;
+        if (next > VIEWER_ZOOM_MAX) next = VIEWER_ZOOM_MAX;
         if (next == old) return;
-        float pane_cx;
-        if (g_count == 2) {
-            int mid = g_win_w / 2;
-            pane_cx = (p == 0) ? ((float)mid * 0.5f) : ((float)mid + (float)(g_win_w - mid) * 0.5f);
-        } else {
-            pane_cx = (float)g_win_w * 0.5f;
-        }
-        float pane_cy = (float)g_win_h * 0.5f;
+
+        float pane_cx, pane_cy;
+        viewer_get_pane_center(p, &pane_cx, &pane_cy);
+
         g_free_pan_x[p] += ((float)mx - pane_cx) * (1.0f / next - 1.0f / old);
         g_free_pan_y[p] += ((float)my - pane_cy) * (1.0f / next - 1.0f / old);
         g_free_zoom[p] = next;
@@ -1955,8 +1996,7 @@ ViewerMetadataLayout viewer_calc_metadata_layout(int win_w, int win_h, int exif_
 void viewer_render_metadata(SDL_Renderer *ren) {
     if (!g_show_metadata || !ren || g_win_w <= 0 || g_win_h <= 0) return;
     if (g_count <= 0) return;
-    int pane = (g_count == 1) ? 0 : g_active;
-    if (pane < 0 || pane >= g_count) pane = 0;
+    int pane = viewer_get_active_pane();
     if (!g_img[pane].path) return;
 
     const char *path = g_img[pane].path;

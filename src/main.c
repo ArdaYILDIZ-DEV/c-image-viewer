@@ -88,7 +88,7 @@ static void handle_drop_file(char *dropped) {
     if (viewer_validate_image_path(dropped, clean, sizeof(clean))) {
         int mx = 0, my = 0;
         SDL_GetMouseState(&mx, &my);
-        apply_pane_replacement((g_count == 2 && mx >= g_win_w / 2) ? 1 : 0, clean);
+        apply_pane_replacement(viewer_get_pane_at(mx), clean);
     } else {
         fprintf(stderr, "Rejected invalid dropped file: %s\n", dropped);
     }
@@ -99,7 +99,7 @@ static void handle_drop_file(char *dropped) {
  * Copy active pane image to the system clipboard via external tool.
  */
 static void handle_clipboard_copy(void) {
-    int pane = (g_count == 1) ? 0 : g_active;
+    int pane = viewer_get_active_pane();
     if (pane < g_count && g_img[pane].path) {
         bool ok = clipboard_copy_path(g_img[pane].path);
         fprintf(stderr, "Clipboard copy %s: %s\n",
@@ -113,7 +113,7 @@ static void handle_clipboard_copy(void) {
 static void handle_clipboard_paste(void) {
     char *tmp = clipboard_paste_to_temp();
     if (tmp) {
-        int pane = (g_count == 1) ? 0 : g_active;
+        int pane = viewer_get_active_pane();
         apply_pane_replacement(pane, tmp);
         unlink(tmp);
         free(tmp);
@@ -167,16 +167,12 @@ static void handle_keydown(SDL_Keycode key, SDL_Keymod mod, bool *running, bool 
         int mx, my;
         SDL_GetMouseState(&mx, &my);
         bool mouse_out = (mx < 0 || mx >= g_win_w || my < 0 || my >= g_win_h);
-        bool hover_inactive = (!g_sync && g_count == 2 &&
-            ((g_active == 0 && mx >= g_win_w / 2) || (g_active == 1 && mx < g_win_w / 2)));
+        bool hover_inactive = (!g_sync && g_count == 2 && viewer_get_pane_at(mx) != viewer_get_active_pane());
         if (mouse_out || hover_inactive) {
-            if (g_count == 2) {
-                int mid = g_win_w / 2;
-                mx = (g_active == 0) ? (mid / 2) : (mid + (g_win_w - mid) / 2);
-            } else {
-                mx = g_win_w / 2;
-            }
-            my = g_win_h / 2;
+            float cx, cy;
+            viewer_get_pane_center(viewer_get_active_pane(), &cx, &cy);
+            mx = (int)cx;
+            my = (int)cy;
         }
         viewer_do_zoom(f, mx, my);
         need_title = true;
@@ -403,7 +399,7 @@ int main(int argc, char *argv[]) {
                 if (ev.button.button == SDL_BUTTON_LEFT) {
                     // In free mode, clicking a pane makes it active.
                     if (!g_sync && g_count == 2) {
-                        g_active = (ev.button.x < g_win_w / 2) ? 0 : 1;
+                        g_active = viewer_get_pane_at(ev.button.x);
                         viewer_update_title();
                     }
                     dragging = true;
